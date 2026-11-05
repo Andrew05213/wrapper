@@ -28,6 +28,9 @@ static std::string g_guestPort = "12340";
 static std::string g_guestHost = "0.0.0.0";
 static std::string g_memory = "512";
 static std::string g_smp = "2";
+/* QEMU otherwise sizes its TCG code cache from host RAM (often 1 GiB).
+   This service needs a much smaller cache; keep guest RAM independent. */
+static std::string g_tbSize = "64";
 static std::string g_forcedAccel;
 static std::string g_qemuBin;
 
@@ -291,6 +294,8 @@ static std::vector<std::string> buildQemuArgs(const std::string& qemuBin,
     args.push_back("-accel");
     if (accel == "whpx") {
         args.push_back("whpx,kernel-irqchip=off");
+    } else if (accel == "tcg") {
+        args.push_back("tcg,tb-size=" + g_tbSize);
     } else {
         args.push_back(accel);
     }
@@ -345,6 +350,8 @@ static int runQemu(const std::string& qemuBin, const std::string& accel,
                    const std::string& dir, const std::string& argsFile) {
     std::vector<std::string> qargs = buildQemuArgs(qemuBin, accel, dir, argsFile);
     std::fprintf(stderr, "[run] accel=%s qemu=%s\n", accel.c_str(), qemuBin.c_str());
+    if (accel == "tcg")
+        std::fprintf(stderr, "[run] TCG translation cache limit=%s MiB\n", g_tbSize.c_str());
     return spawnAndWait(qargs);
 }
 
@@ -356,6 +363,7 @@ int main(int argc, char** argv) {
     g_guestHost = getEnv("LITE_GUEST_HOST", "0.0.0.0");
     g_memory = getEnv("MEMORY", "512");
     g_smp = getEnv("SMP", "2");
+    g_tbSize = getEnv("LITE_QEMU_TB_SIZE", "64");
     g_forcedAccel = getEnv("LITE_QEMU_ACCEL", "");
     g_qemuBin = getEnv("QEMU_BIN", "");
 
@@ -364,7 +372,11 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         bool wantsValue = (a == "--host" || a == "--host-port" || a == "--guest-port" ||
                            a == "--guest-host" || a == "--memory" || a == "--smp" ||
-                           a == "--accel" || a == "--qemu-bin");
+                           a == "--accel" || a == "--qemu-bin" || a == "--tb-size");
+        if (wantsValue && i + 1 == argc) {
+            std::fprintf(stderr, "[run] %s requires a value\n", a.c_str());
+            return 1;
+        }
         if (wantsValue && i + 1 < argc) {
             std::string v = argv[++i];
             if (a == "--host") g_host = v;
@@ -373,11 +385,22 @@ int main(int argc, char** argv) {
             else if (a == "--guest-host") g_guestHost = v;
             else if (a == "--memory") g_memory = v;
             else if (a == "--smp") g_smp = v;
+            else if (a == "--tb-size") g_tbSize = v;
             else if (a == "--accel") g_forcedAccel = v;
             else if (a == "--qemu-bin") g_qemuBin = v;
         } else {
             liteArgs.push_back(a);
         }
+    }
+
+    /* Accept only a positive decimal size, also excluding accidental QEMU
+       property injection through the comma-separated -accel argument. */
+    if (g_tbSize.find_first_not_of("0123456789") != std::string::npos ||
+        g_tbSize.empty() || g_tbSize.size() > 4 ||
+        std::strtoul(g_tbSize.c_str(), nullptr, 10) < 1 ||
+        std::strtoul(g_tbSize.c_str(), nullptr, 10) > 4096) {
+        std::fprintf(stderr, "[run] --tb-size / LITE_QEMU_TB_SIZE must be 1..4096 MiB\n");
+        return 1;
     }
 
     std::string dir = executableDir();

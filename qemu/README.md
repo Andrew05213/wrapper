@@ -38,7 +38,15 @@ c++ -std=c++11 -O2 -o wrapper-lite-qemu wrapper-lite-qemu.cpp
 ./wrapper-lite-qemu
 ```
 
-All arguments except `--accel` are forwarded line-by-line to wrapper-lite inside the guest.
+Launcher options such as `--memory`, `--smp`, `--accel` and `--tb-size` are
+consumed by the launcher. Other arguments are forwarded line-by-line to
+wrapper-lite inside the guest. See the main README for the full option list.
+
+TCG's translation cache is limited to 64 MiB by default, independently of the
+512 MB guest RAM setting. This prevents QEMU's automatic code cache (which can
+reach 1 GiB) from growing as more tracks are processed. Use `--tb-size 128`
+if a larger cache improves throughput on your host. This option has no effect
+on KVM, HVF or WHPX.
 
 ## Acceleration
 
@@ -70,11 +78,12 @@ Windows WHPX uses:
 | `GUEST_PORT` | `12340` | guest port |
 | `MEMORY` | `512` | guest memory in MB |
 | `SMP` | `2` | guest CPU count |
+| `LITE_QEMU_TB_SIZE` | `64` | TCG translation cache limit in MiB (1–4096) |
 | `LITE_QEMU_ACCEL` | auto | force acceleration |
 | `QEMU_BIN` | auto | QEMU binary path |
 
 ## QEMU lookup order
 
-1. `QEMU_BIN`
-2. `PATH`
-3. `qemu/bin/`
+1. `--qemu-bin` / `QEMU_BIN`
+2. `qemu/bin/`
+3. `PATH`
