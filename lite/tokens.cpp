@@ -1,4 +1,7 @@
 #include "internal.h"
+#include "library_ownership.h"
+#include <cstddef>
+#include <memory>
 #include "cJSON.h"
 #include <cstdio>
 #include <cstdlib>
@@ -34,45 +37,72 @@ long long getCurrentTimeMillis() {
     return tv.tv_sec * 1000LL + tv.tv_usec / 1000;
 }
 
-static char* get_guid() {
-    char* ret[2];
-    _ZN17storeservicescore10DeviceGUID4guidEv(ret, GUID.obj);
-    char* guid = _ZNK13mediaplatform4Data5bytesEv(ret[0]);
-    return strdup(guid);
+// Data::bytes() is a bounded byte buffer, not a C string.
+static bool read_library_data(void* data, size_t maximum, std::string& out) {
+    if (!data) return false;
+    size_t size = _ZNK13mediaplatform4Data6lengthEv(data);
+    const char* bytes = _ZNK13mediaplatform4Data5bytesEv(data);
+    if (!bytes || !size || size > maximum) return false;
+    out.assign(bytes, size);
+    return true;
 }
 
-/* Build a shared_ptr<HTTPMessage> with a control block that behaves like a
- * real make_shared emplace (defensive hardening):
- *   - refcounts start at 1, so the Android library's internal copy/release
- *     cycles never reach zero and __on_zero_shared() (which would destroy
- *     the value and `delete` the block) is never invoked.  The previous code
- *     used a static buffer with refcount 0, which is invalid for a held
- *     shared_ptr.
- *   - the block is heap-allocated, so even if the library ever releases the
- *     last reference, freeing it is safe.
- */
+static char* get_guid() {
+    library_shared_ptr data;
+    _ZN17storeservicescore10DeviceGUID4guidEv(&data.value, GUID.obj);
+    std::string guid;
+    if (!read_library_data(data.value.obj, 4096, guid)) return nullptr;
+    if (guid.find('\0') != std::string::npos) return nullptr;
+    return strdup(guid.c_str());
+}
+
+// Every response accessor below borrows storage from the live URLRequest.
+static char* response_token(void* request, const char* name) {
+    auto* error = _ZNK17storeservicescore10URLRequest5errorEv(request);
+    if (!error || error->obj) return nullptr;
+    auto* response = _ZNK17storeservicescore10URLRequest8responseEv(request);
+    if (!response || !response->obj) return nullptr;
+    auto* underlying = _ZNK17storeservicescore11URLResponse18underlyingResponseEv(response->obj);
+    if (!underlying || !underlying->obj) return nullptr;
+    void* data = *reinterpret_cast<void**>(static_cast<char*>(underlying->obj) + 48);
+    std::string body;
+    if (!read_library_data(data, 256 * 1024, body)) return nullptr;
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
+        cJSON_ParseWithLength(body.data(), body.size()), &cJSON_Delete);
+    const cJSON* token = cJSON_GetObjectItemCaseSensitive(root.get(), name);
+    if (!cJSON_IsString(token) || !token->valuestring[0]) return nullptr;
+    return strdup(token->valuestring);
+}
+
+/* Match the bundled libc++ emplace layout: vptr, two zero-based counts,
+   then HTTPMessage at +24. A count of 0 represents one owning reference.
+   Artificially pinning either count at 1 keeps every request alive forever. */
 static struct shared_ptr make_http_message(const char* url, const char* method) {
-    uint8_t* ptr = (uint8_t*)calloc(1, 512);
+    library_object_guard allocation(::operator new(512), [](void* p) { ::operator delete(p); });
+    auto* ptr = static_cast<uint8_t*>(allocation.object);
+    memset(ptr, 0, 512);
     *(void**)ptr = &_ZTVNSt6__ndk120__shared_ptr_emplaceIN13mediaplatform11HTTPMessageENS_9allocatorIS2_EEEE + 2;
-    *(size_t*)(ptr + 8) = 1;   /* __shared_owners_ */
-    *(size_t*)(ptr + 16) = 1;  /* __shared_weak_owners_ */
-    struct shared_ptr httpMessage = {.obj = ptr + 32, .ctrl_blk = ptr};
+    struct shared_ptr httpMessage = {.obj = ptr + 24, .ctrl_blk = ptr};
     union std_string u = new_std_string(url);
     union std_string m = new_std_string(method);
     _ZN13mediaplatform11HTTPMessageC2ENSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES7_(httpMessage.obj, &u, &m);
+    allocation.object = nullptr;
     return httpMessage;
 }
 
 static char* get_dev_token_impl() {
-    struct shared_ptr httpMessage = make_http_message("https://sf-api-token-service.itunes.apple.com/apiToken", "GET");
+    library_shared_ptr message_owner;
+    message_owner.value = make_http_message("https://sf-api-token-service.itunes.apple.com/apiToken", "GET");
+    struct shared_ptr& httpMessage = message_owner.value;
 
     /* URLRequest is larger than 512 bytes; a 512-byte buffer overflowed in
        the constructor and corrupted the caller's stack frame (crashing the
        refresh with a null std::string move).  2048 bytes keeps the object
        contained. */
-    uint8_t urlRequest[2048];
+    alignas(std::max_align_t) uint8_t urlRequest[2048];
     memset(urlRequest, 0, sizeof(urlRequest));
     _ZN17storeservicescore10URLRequestC2ERKNSt6__ndk110shared_ptrIN13mediaplatform11HTTPMessageEEERKNS2_INS_14RequestContextEEE(urlRequest, &httpMessage, &g_reqCtx);
+    library_object_guard request_owner(urlRequest, _ZN17storeservicescore10URLRequestD2Ev);
     union std_string clientIdName = new_std_string("clientId");
     union std_string clientIdValue = new_std_string("musicAndroid");
     _ZN17storeservicescore10URLRequest19setRequestParameterERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_(urlRequest, &clientIdName, &clientIdValue);
@@ -81,33 +111,16 @@ static char* get_dev_token_impl() {
     _ZN17storeservicescore10URLRequest19setRequestParameterERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_(urlRequest, &versionName, &versionValue);
     _ZN17storeservicescore10URLRequest3runEv(urlRequest);
 
-    struct shared_ptr* err = _ZNK17storeservicescore10URLRequest5errorEv(urlRequest);
-    if (err->obj != nullptr) {
-        LOG_WARN("devToken error");
-        return nullptr;
-    }
-    struct shared_ptr* urlResp = _ZNK17storeservicescore10URLRequest8responseEv(urlRequest);
-    struct shared_ptr* resp = _ZNK17storeservicescore11URLResponse18underlyingResponseEv(urlResp->obj);
-    void* http_message_obj = resp->obj;
-    void** data_ptr_location = (void**)((char*)http_message_obj + 48);
-    void* data_ptr = *data_ptr_location;
-    char* respBody = _ZNK13mediaplatform4Data5bytesEv(data_ptr);
-    if (!respBody) return nullptr;
-    std::string respBodyStr(respBody, strnlen(respBody, 4096));
-    const std::string key = "\"token\":\"";
-    size_t ks = respBodyStr.find(key);
-    if (ks == std::string::npos) return nullptr;
-    ks += key.size();
-    size_t ke = respBodyStr.find('"', ks);
-    if (ke == std::string::npos) return nullptr;
-    return strdup(respBodyStr.substr(ks, ke - ks).c_str());
+    return response_token(urlRequest, "token");
 }
 
 static char* get_music_user_token_impl(const char* authToken) {
-    char* guid = get_guid();
+    std::unique_ptr<char, decltype(&free)> guid(get_guid(), &free);
     if (!guid) return nullptr;
 
-    struct shared_ptr httpMessage = make_http_message("https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/createMusicToken", "POST");
+    library_shared_ptr message_owner;
+    message_owner.value = make_http_message("https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/createMusicToken", "POST");
+    struct shared_ptr& httpMessage = message_owner.value;
 
     union std_string ctHeader = new_std_string("Content-Type");
     union std_string ctValue = new_std_string("application/json; charset=UTF-8");
@@ -126,7 +139,7 @@ static char* get_music_user_token_impl(const char* authToken) {
     _ZN13mediaplatform11HTTPMessage9setHeaderERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_(httpMessage.obj, &guidHeader, &guidValue);
 
     cJSON* bodyJson = cJSON_CreateObject();
-    cJSON_AddStringToObject(bodyJson, "guid", guid);
+    cJSON_AddStringToObject(bodyJson, "guid", guid.get());
     cJSON_AddStringToObject(bodyJson, "assertion", authToken ? authToken : "");
     char tcc[32];
     snprintf(tcc, sizeof(tcc), "%lld", (long long)getCurrentTimeMillis());
@@ -139,50 +152,20 @@ static char* get_music_user_token_impl(const char* authToken) {
     }
 
     /* URLRequest is larger than 512 bytes; see get_dev_token_impl(). */
-    uint8_t urlRequest[2048];
+    alignas(std::max_align_t) uint8_t urlRequest[2048];
     memset(urlRequest, 0, sizeof(urlRequest));
     _ZN17storeservicescore10URLRequestC2ERKNSt6__ndk110shared_ptrIN13mediaplatform11HTTPMessageEEERKNS2_INS_14RequestContextEEE(urlRequest, &httpMessage, &g_reqCtx);
+    library_object_guard request_owner(urlRequest, _ZN17storeservicescore10URLRequestD2Ev);
     _ZN17storeservicescore10URLRequest3runEv(urlRequest);
-    free(guid);
 
-    struct shared_ptr* err = _ZNK17storeservicescore10URLRequest5errorEv(urlRequest);
-    if (err->obj != nullptr) {
-        LOG_WARN("createMusicToken error");
-        return nullptr;
-    }
-    struct shared_ptr* urlResp = _ZNK17storeservicescore10URLRequest8responseEv(urlRequest);
-    struct shared_ptr* resp = _ZNK17storeservicescore11URLResponse18underlyingResponseEv(urlResp->obj);
-    void* http_message_obj = resp->obj;
-    void** data_ptr_location = (void**)((char*)http_message_obj + 48);
-    void* data_ptr = *data_ptr_location;
-    char* respBody = _ZNK13mediaplatform4Data5bytesEv(data_ptr);
-    if (!respBody) return nullptr;
-    std::string respBodyStr(respBody, strnlen(respBody, 4096));
-    const std::string key = "\"music_token\":\"";
-    size_t ks = respBodyStr.find(key);
-    if (ks == std::string::npos) {
-        LOG_WARN("createMusicToken failed: no music_token in response");
-        return nullptr;
-    }
-    ks += key.size();
-    size_t ke = respBodyStr.find('"', ks);
-    if (ke == std::string::npos) return nullptr;
-    return strdup(respBodyStr.substr(ks, ke - ks).c_str());
+    return response_token(urlRequest, "music_token");
 }
 
 static char* get_account_storefront_id_impl() {
-    union std_string* region = (union std_string*)malloc(sizeof(union std_string));
-    memset(region, 0, sizeof(union std_string));
-    struct shared_ptr urlbag = {.obj = 0x0, .ctrl_blk = 0x0};
-    _ZNK17storeservicescore14RequestContext20storeFrontIdentifierERKNSt6__ndk110shared_ptrINS_6URLBagEEE(region, g_reqCtx.obj, &urlbag);
-    const char* region_str = std_string_data(region);
-    if (region_str) {
-        char* result = strdup(region_str);
-        free(region);
-        return result;
-    }
-    free(region);
-    return nullptr;
+    library_string region;
+    struct shared_ptr urlbag = {.obj = nullptr, .ctrl_blk = nullptr};
+    _ZNK17storeservicescore14RequestContext20storeFrontIdentifierERKNSt6__ndk110shared_ptrINS_6URLBagEEE(&region.value, g_reqCtx.obj, &urlbag);
+    return region.data() ? strdup(region.data()) : nullptr;
 }
 
 int offline_available_impl() {

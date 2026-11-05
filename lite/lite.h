@@ -51,15 +51,16 @@ constexpr int CURLOPT_WRITEFUNCTION = 20011;
 constexpr int CURLOPT_WRITEDATA   = 10001;
 constexpr int CURLOPT_HTTPHEADER  = 10023;
 constexpr int CURLOPT_POSTFIELDS  = 10015;
-constexpr int CURLOPT_POSTFIELDSIZE = 20015;
+constexpr int CURLOPT_POSTFIELDSIZE = 60;
 constexpr int CURLOPT_USERAGENT   = 10018;
 constexpr int CURLOPT_POST        = 47;
 constexpr int CURLOPT_TIMEOUT_MS  = 155;
 constexpr int CURLOPT_SSL_VERIFYPEER = 64;
 constexpr int CURLOPT_SSL_VERIFYHOST = 81;
+constexpr int CURLOPT_CAINFO = 10065;
 constexpr int CURLOPT_FOLLOWLOCATION = 52;
 constexpr int CURLOPT_ACCEPT_ENCODING = 10102;
-constexpr int CURLINFO_RESPONSE_CODE = 0x2000002;
+constexpr int CURLINFO_RESPONSE_CODE = 0x200002;
 
 struct CurlSlist {
     void* list;
@@ -114,6 +115,14 @@ std::string get_key(const std::string& adamId, const std::string& uri,
                              uint64_t* r9, uint64_t* rbp);
 std::string get_storefront();
 std::string get_music_token();
+// AMDL's private sample transport calls these while serving /native/decrypt.
+// Closing is idempotent; idle streams also expire after 120 seconds.
+bool native_decrypt(const std::string& stream, const std::string& adam,
+                    const std::string& uri, const std::string& input,
+                    std::string& output);
+void native_decrypt_close(const std::string& stream);
+void native_decrypt_expire();
+void native_decrypt_close_all();
 std::string get_dev_token();
 std::string fetch_dev_token();
 void setup_services();

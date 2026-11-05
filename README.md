@@ -156,6 +156,7 @@ Pass `--device-info <string>` to override the entire string explicitly.
 | `--guest-port <port>` | `12340` | guest port |
 | `--guest-host <addr>` | `0.0.0.0` | address the guest lite listens on (must be reachable by QEMU forwarding) |
 | `--memory <MB>` | `512` | guest memory in MB |
+| `--tb-size <MiB>` | `64` | TCG translation cache limit (1–4096); used only with software emulation |
 | `--smp <N>` | `2` | guest CPU count |
 | `--accel <accel>` | auto | force acceleration (`kvm`, `hvf`, `whpx`, `tcg`) |
 | `--qemu-bin <path>` | auto | QEMU binary path |
@@ -170,13 +171,68 @@ Environment variables (fallbacks; command-line flags take precedence):
 | `LITE_GUEST_HOST` | `0.0.0.0` | address the guest lite listens on |
 | `MEMORY` | `512` | guest memory in MB |
 | `SMP` | `2` | guest CPU count |
+| `LITE_QEMU_TB_SIZE` | `64` | TCG translation cache limit in MiB |
 | `LITE_QEMU_ACCEL` | auto | force acceleration |
 | `QEMU_BIN` | auto | QEMU binary path |
+
+### QEMU memory use
+
+`--memory` controls guest RAM, not the total memory used by the host QEMU
+process. With TCG software emulation, QEMU also stores translated machine code.
+Its automatic cache size can reach 1 GiB on larger hosts and fill progressively
+as more tracks are processed. The launcher limits that cache to 64 MiB by
+default, including when hardware acceleration falls back to TCG.
+
+```bash
+./wrapper-lite-qemu --memory 512 --tb-size 64
+# If repeated translation slows down your workload, try a larger cache:
+./wrapper-lite-qemu --tb-size 128
+```
+
+A smaller cache can cause more frequent translation work. These limits do not
+cap all QEMU allocations; guest RAM, translated-code metadata, devices and
+shared libraries also contribute to host memory use. KVM/HVF/WHPX do not use
+the TCG cache setting.
 
 ## Build notes
 
 - Release: SSL verification is enabled by default. Pass `--debug` to disable it temporarily.
 - Debug: SSL verification is disabled by default.
+- The QEMU build includes a CA bundle at `/usr/local/android/cert.pem`. Set
+  `SSL_CERT_FILE` to supply a different bundle when building or running natively.
+
+## AMDL integration
+
+The Android binary now provides `native_decrypt(stream, adamId, uri, input,
+output)`, `native_decrypt_close(stream)` and `native_decrypt_close_all()` in
+`lite/lite.h`. These are C++ entry points for AMDL's private HTTP adapter;
+the public HTTP endpoints and authentication model are unchanged.
+
+Each native stream owns its FairPlay context. The controller's extra cache
+references are detached while active streams keep their own references. Closing
+or changing a key releases that stream's context; it does not release another
+active stream's owner. Failed operations also release their owners. At most 32
+streams can be active, and the service collects streams idle for 120 seconds,
+including streams abandoned when a client exits or its DELETE request is lost.
+
+When switching AMDL's locked wrapper input to this branch:
+
+- Remove the `NativeStream` map and `native_decrypt`/`native_decrypt_close`
+  implementations appended by the old `lite-session.patch`. Keep AMDL's private
+  routes and call the implementations supplied here.
+- Rebase the native login, TLS/DNS and store-binding patches against this source.
+  This branch changes authentication input handling, curl setup and token parsing;
+  the patches against `2fd7e0e` are not drop-in patches for this revision.
+- Pin the new wrapper commit and archive hash, then rebuild AMDL's guest and its
+  bundle manifest through AMDL's own runtime build. The generic QEMU guest from
+  this repository does not contain AMDL's guest agent or private session protocol.
+- AMDL launches QEMU directly from its Go runtime. Apply the TCG cache limit to
+  that launcher's `-accel` argument as well; changing `wrapper-lite-qemu` affects
+  only this repository's launcher.
+
+AMDL-side cleanup retries and download memory buffering are separate changes in
+the AMDL repository. In particular, its per-track `max-memory-limit` is not a
+shared memory budget across parallel downloads.
 
 ## License
 

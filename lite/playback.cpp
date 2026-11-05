@@ -1,4 +1,7 @@
 #include "internal.h"
+#include "library_ownership.h"
+#include "native_streams.h"
+#include <cstddef>
 #include "dobby.h"
 #include <cstdio>
 #include <cstdlib>
@@ -11,9 +14,9 @@
 extern const char* const fairplayCert;
 
 const char* get_m3u8_download(unsigned long adam) {
-    void* purchase_request = malloc(1024);
-    memset(purchase_request, 0, 1024);
+    alignas(std::max_align_t) uint8_t purchase_request[1024] = {};
     _ZN17storeservicescore15PurchaseRequestC2ERKNSt6__ndk110shared_ptrINS_14RequestContextEEE(purchase_request, &g_reqCtx);
+    library_object_guard request_owner(purchase_request, _ZN17storeservicescore15PurchaseRequestD2Ev);
     _ZN17storeservicescore15PurchaseRequest23setProcessDialogActionsEb(purchase_request, 1);
     union std_string urlBagKey = new_std_string("subDownload");
     _ZN17storeservicescore15PurchaseRequest12setURLBagKeyERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(purchase_request, &urlBagKey);
@@ -23,62 +26,42 @@ const char* get_m3u8_download(unsigned long adam) {
     _ZN17storeservicescore15PurchaseRequest16setBuyParametersERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(purchase_request, &bp);
     _ZN17storeservicescore15PurchaseRequest3runEv(purchase_request);
     struct shared_ptr* response = _ZNK17storeservicescore15PurchaseRequest8responseEv(purchase_request);
-    if (!response) { free(purchase_request); return nullptr; }
+    if (!response || !response->obj) return nullptr;
     struct shared_ptr* error = _ZN17storeservicescore16PurchaseResponse5errorEv(response->obj);
-    if (!error || error->obj) { free(purchase_request); return nullptr; }
+    if (!error || error->obj) return nullptr;
 
-    struct std_vector items = _ZNK17storeservicescore16PurchaseResponse5itemsEv(response->obj);
-    if (!items.begin) { free(purchase_request); return nullptr; }
-    struct shared_ptr* firstItem = (struct shared_ptr*)items.begin;
-    struct std_vector assets = _ZNK17storeservicescore12PurchaseItem6assetsEv(firstItem->obj);
-    struct shared_ptr* lastAsset = (struct shared_ptr*)((uint8_t*)assets.end - sizeof(struct shared_ptr));
-    union std_string* url_str = (union std_string*)malloc(sizeof(union std_string));
-    memset(url_str, 0, sizeof(union std_string));
-    _ZNK17storeservicescore13PurchaseAsset3URLEv(url_str, lastAsset->obj);
-    const char* url = std_string_data(url_str);
-    if (url) {
-        char* result = strdup(url);
-        free(url_str); free(purchase_request);
-        return result;
-    }
-    free(url_str); free(purchase_request);
-    return nullptr;
+    library_shared_vector items(_ZNK17storeservicescore16PurchaseResponse5itemsEv(response->obj));
+    if (!items.value.begin || items.value.begin == items.value.end) return nullptr;
+    auto* firstItem = static_cast<struct shared_ptr*>(items.value.begin);
+    if (!firstItem->obj) return nullptr;
+    library_shared_vector assets(_ZNK17storeservicescore12PurchaseItem6assetsEv(firstItem->obj));
+    if (!assets.value.begin || assets.value.begin == assets.value.end) return nullptr;
+    auto* lastAsset = static_cast<struct shared_ptr*>(assets.value.end) - 1;
+    if (!lastAsset->obj) return nullptr;
+    library_string url;
+    _ZNK17storeservicescore13PurchaseAsset3URLEv(&url.value, lastAsset->obj);
+    return url.data() ? strdup(url.data()) : nullptr;
 }
 
 const char* get_m3u8_play(unsigned long adam) {
     union std_string HLS = new_std_string("HLS");
-    struct std_vector HLSParam;
-    memset(&HLSParam, 0, sizeof(HLSParam));
-    HLSParam.begin = (struct shared_ptr*)malloc(sizeof(union std_string));
-    memcpy(HLSParam.begin, &HLS, sizeof(union std_string));
-    HLSParam.end = (struct shared_ptr*)((uint8_t*)HLSParam.begin + 1);
-    HLSParam.end_capacity = HLSParam.end;
+    /* vector<string> bounds are byte addresses spanning one entire string. */
+    struct std_vector HLSParam = {&HLS, &HLS + 1, &HLS + 1};
 
-    static uint8_t z0 = 0;
-    struct shared_ptr ptr_result;
-    memset(&ptr_result, 0, sizeof(ptr_result));
+    uint8_t z0 = 0;
+    library_shared_ptr result;
     _ZN22SVPlaybackLeaseManager12requestAssetERKmRKNSt6__ndk16vectorINS2_12basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEENS7_IS9_EEEERKb(
-        &ptr_result, leaseMgr, &adam, &HLSParam, &z0);
-    free(HLSParam.begin);
+        &result.value, leaseMgr, &adam, &HLSParam, &z0);
 
-    if (!ptr_result.obj) return nullptr;
-    if (!_ZNK23SVPlaybackAssetResponse13hasValidAssetEv(ptr_result.obj)) return nullptr;
+    if (!result.value.obj) return nullptr;
+    if (!_ZNK23SVPlaybackAssetResponse13hasValidAssetEv(result.value.obj)) return nullptr;
 
-    struct shared_ptr* playbackAsset = _ZNK23SVPlaybackAssetResponse13playbackAssetEv(ptr_result.obj);
+    struct shared_ptr* playbackAsset = _ZNK23SVPlaybackAssetResponse13playbackAssetEv(result.value.obj);
     if (!playbackAsset || !playbackAsset->obj) return nullptr;
 
-    union std_string* m3u8 = (union std_string*)malloc(sizeof(union std_string));
-    memset(m3u8, 0, sizeof(union std_string));
-    _ZNK17storeservicescore13PlaybackAsset9URLStringEv(m3u8, (uint8_t*)playbackAsset->obj);
-
-    const char* m3u8_str = std_string_data(m3u8);
-    if (m3u8_str) {
-        char* result = strdup(m3u8_str);
-        free(m3u8);
-        return result;
-    }
-    free(m3u8);
-    return nullptr;
+    library_string m3u8;
+    _ZNK17storeservicescore13PlaybackAsset9URLStringEv(&m3u8.value, static_cast<uint8_t*>(playbackAsset->obj));
+    return m3u8.data() ? strdup(m3u8.data()) : nullptr;
 }
 
 /* getPersistentKey() returns an owning shared_ptr, and nothing in the library
@@ -248,17 +231,22 @@ static int capture_content_template(const std::string& adam, const std::string& 
     if (with_refresh) refresh_decrypt_ctx();
     persistent_key fetched;
     struct shared_ptr owner = {.obj = nullptr, .ctrl_blk = nullptr};
+    library_object_guard context_cleanup(&owner, [](void* p) {
+        g_cap_armed = 0;
+        release_decrypt_ctxs(static_cast<struct shared_ptr*>(p));
+    });
     void* kdPtr = (void*)getKdContext(adam, uri, &owner, known, &fetched.p);
-    if (!kdPtr || !*(void**)kdPtr) { LOG_WARN("getKdContext failed"); release_decrypt_ctxs(&owner); return -1; }
+    if (!kdPtr || !*(void**)kdPtr) { LOG_WARN("getKdContext failed"); return -1; }
     void* kd = *(void**)kdPtr;
     setup_r1_hook();
-    if (!g_r1_hooked) { release_decrypt_ctxs(&owner); return -1; }
+    if (!g_r1_hooked) return -1;
     g_cap_armed = 1;
     g_cap_done = 0;
     uint8_t dummy[64] = {0};
     NfcRKVnxuKZy04KWbdFu71Ou(kd, 5, dummy, dummy, 64);
     g_cap_armed = 0;
     release_decrypt_ctxs(&owner);
+    context_cleanup.object = nullptr;
     if (!g_cap_done) { LOG_WARN("R1 capture triggered but no data"); return -1; }
     memcpy(cap_ctx, g_cap_ctx, 0x8000);
     memcpy(cap_state, g_cap_state, 0x2100);
@@ -306,4 +294,72 @@ std::string get_key(const std::string& adamId, const std::string& uri,
         }
     }
     return result;
+}
+
+namespace {
+class OwnedNativeContext final : public NativeDecryptContext {
+public:
+    library_shared_ptr owner;
+    void* kd = nullptr;
+    bool decrypt(const std::string& input, std::string& output) override {
+        output = input;
+        NfcRKVnxuKZy04KWbdFu71Ou(kd, 5, &output[0], &output[0], output.size());
+        return true;
+    }
+};
+
+std::unique_ptr<NativeDecryptContext> acquire_native_context(
+        const std::string& adam, const std::string& uri) {
+    std::unique_ptr<OwnedNativeContext> context(new OwnedNativeContext);
+    // Detach the controller's extra references on success AND exceptions.
+    // Every active stream retains its own shared_ptr, so clearing the cache
+    // cannot destroy another stream's context. Do not return bare kd pointers.
+    library_object_guard cache_cleanup(FHinstance, [](void* controller) {
+        _ZN21SVFootHillSessionCtrl16resetAllContextsEv(controller);
+    });
+    persistent_key key;
+    std::unique_ptr<char, decltype(&free)> content(
+        get_content_key_impl(adam, uri, &key.p), &free);
+    if (!content || !key.p.obj) return nullptr;
+    _ZN21SVFootHillSessionCtrl14decryptContextERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEERKN11SVDecryptor15SVDecryptorTypeERKb(
+        &context->owner.value, FHinstance, static_cast<union std_string*>(key.p.obj));
+    if (!context->owner.value.obj) return nullptr;
+    auto* kd = _ZNK18SVFootHillPContext9kdContextEv(context->owner.value.obj);
+    if (!kd || !*kd) return nullptr;
+    context->kd = *static_cast<void**>(*kd);
+    if (!context->kd) return nullptr;
+    return std::unique_ptr<NativeDecryptContext>(context.release());
+}
+
+NativeStreams native_streams;
+}
+
+bool native_decrypt(const std::string& stream, const std::string& adam,
+                    const std::string& uri, const std::string& input,
+                    std::string& output) {
+    output.clear();
+    if (!FHinstance || stream.size() != 32 || adam.empty() || adam.size() > 20 ||
+        uri.size() > 2048 || uri.find("skd://itunes.apple.com/") != 0 ||
+        input.empty() || input.size() > (1 << 20) || input.size() % 16 ||
+        (adam != "0" && uri == "skd://itunes.apple.com/P000000000/s1/e1")) return false;
+    for (char c : stream) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    for (char c : adam) if (c < '0' || c > '9') return false;
+    for (unsigned char c : uri) if (c <= 32 || c == 127) return false;
+    std::lock_guard<std::mutex> lock(g_playback_mutex);
+    return native_streams.decrypt(stream, adam, uri, input, output, acquire_native_context);
+}
+
+void native_decrypt_close(const std::string& stream) {
+    std::lock_guard<std::mutex> lock(g_playback_mutex);
+    native_streams.close(stream);
+}
+
+void native_decrypt_expire() {
+    std::lock_guard<std::mutex> lock(g_playback_mutex);
+    native_streams.expire();
+}
+
+void native_decrypt_close_all() {
+    std::lock_guard<std::mutex> lock(g_playback_mutex);
+    native_streams.clear();
 }

@@ -425,12 +425,16 @@ static void token_refresh_worker() {
     while (!g_refresh_stop.load()) {
         for (int i = 0; i < g_token_refresh_interval && !g_refresh_stop.load(); ++i) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
+            native_decrypt_expire();
         }
         if (g_refresh_stop.load()) break;
 
         LOG_INFO("background token refresh starting");
         std::string sf, dev, music;
-        if (refresh_tokens(sf, dev, music)) {
+        bool refreshed = false;
+        try { refreshed = refresh_tokens(sf, dev, music); }
+        catch (...) { LOG_WARN("background token refresh raised an exception"); }
+        if (refreshed) {
             std::lock_guard<std::mutex> lock(g_tokens_mutex);
             if (!sf.empty()) {
                 g_tokens.storefront_id = normalize_storefront_id(sf);
@@ -575,7 +579,10 @@ int main(int argc, char* argv[]) {
         }
 
         int status = 0;
-        waitpid(pid, &status, 0);
+        if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            LOG_ERROR("login child failed");
+            return 1;
+        }
 
         /* Read token files (written by the child) into this clean process. */
         auto readFile = [](const std::string& path) {
@@ -692,6 +699,7 @@ int main(int argc, char* argv[]) {
         } catch (...) {
             LOG_ERROR("handler exception: unknown");
         }
+        res.status = 500;
         res.set_content(json_error(500, "internal error"), "application/json");
     });
 
@@ -704,6 +712,7 @@ int main(int argc, char* argv[]) {
     svr.listen(g_host.c_str(), g_port);
 
     g_refresh_stop.store(true);
+    native_decrypt_close_all();
     pthread_kill(sig_thread.native_handle(), SIGTERM);
     if (refresh_thread.joinable()) refresh_thread.join();
     if (sig_thread.joinable()) sig_thread.join();

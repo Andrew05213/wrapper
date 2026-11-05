@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <algorithm>
 #include <unistd.h>
 
 void dialogHandler(long j, struct shared_ptr* protoDialogPtr,
@@ -56,53 +57,38 @@ void credentialHandler(struct shared_ptr* credReqPtr,
              std_string_data(_ZNK17storeservicescore18CredentialsRequest7messageEv(credReqPtr->obj)),
              need2FA ? "true" : "false");
 
-    int passLen = amPassword ? (int)strlen(amPassword) : 0;
-
-    if (need2FA) {
-        std::string path = std::string(g_base_dir) + "/2fa.txt";
+    if (need2FA && amPassword) {
+        char code[8] = {};
         bool got_code = false;
         if (!g_code_from_file && isatty(STDIN_FILENO)) {
-            char code[7];
             printf("2FA code: ");
             fflush(stdout);
-            if (scanf("%6s", code) == 1 && amPassword) {
-                char tmp[64];
-                snprintf(tmp, sizeof(tmp), "%s%s", amPassword, code);
-                free(amPassword);
-                amPassword = strdup(tmp);
-                got_code = true;
-            }
-        }
-        if (!got_code) {
-            if (!file_exists(path.c_str())) {
+            got_code = scanf("%7s", code) == 1;
+        } else {
+            std::string path = std::string(g_base_dir) + "/2fa.txt";
+            if (!file_exists(path.c_str()))
                 LOG_WARN("Enter your 2FA code into %s/2fa.txt", g_base_dir);
-                int count = 0;
-                while (!file_exists(path.c_str()) && count < 20) {
-                    sleep(3);
-                    count++;
-                }
-                if (!file_exists(path.c_str())) {
-                    LOG_WARN("2FA code timeout (60s), aborting login");
-                    exit(1);
-                }
-            }
+            int count = 0;
+            while (!file_exists(path.c_str()) && count++ < 20) sleep(3);
             FILE* fp = fopen(path.c_str(), "r");
             if (fp) {
-                if (amPassword) {
-                    char tmp[64];
-                    snprintf(tmp, sizeof(tmp), "%s", amPassword);
-                    if (fscanf(fp, "%6s", tmp + passLen) == 1) {
-                        free(amPassword);
-                        amPassword = strdup(tmp);
-                    }
-                }
+                got_code = fscanf(fp, "%7s", code) == 1;
                 fclose(fp);
                 remove(path.c_str());
-                LOG_WARN("Code file detected! Logging in...");
-            } else {
-                LOG_WARN("Failed to open 2fa.txt");
             }
         }
+        got_code = got_code && strlen(code) == 6 && strspn(code, "0123456789") == 6;
+        if (got_code) {
+            std::string combined = std::string(amPassword) + code;
+            memset(amPassword, 0, strlen(amPassword));
+            free(amPassword);
+            amPassword = strdup(combined.c_str());
+            std::fill(combined.begin(), combined.end(), '\0');
+        } else {
+            // A failed callback must not terminate a running service.
+            LOG_WARN("2FA code missing or invalid");
+        }
+        memset(code, 0, sizeof(code));
     }
 
     uint8_t* ptr = (uint8_t*)malloc(80);
@@ -152,9 +138,9 @@ bool login(struct shared_ptr ctx) {
         }
         struct shared_ptr* err = _ZNK17storeservicescore20AuthenticateResponse5errorEv(resp->obj);
         if (err && err->obj) {
-            int code = _ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(err->obj);
+            const int* code = _ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(err->obj);
             const char* what = _ZNK17storeservicescore19StoreErrorCondition4whatEv(err->obj);
-            LOG_WARN("auth error: code=%d, message=%s", code, what ? what : "none");
+            LOG_WARN("auth error: code=%d, message=%s", code ? *code : 0, what ? what : "none");
         } else {
             LOG_WARN("auth failed: response type %d", respType);
         }

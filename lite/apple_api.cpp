@@ -33,6 +33,19 @@ CurlEasy::CurlEasy() : handle(nullptr), ok(false) {
     if (!init) { LOG_WARN("curl_easy_init not found"); return; }
     handle = init();
     ok = (handle != nullptr);
+    if (ok) {
+        ok = setOptInt(CURLOPT_SSL_VERIFYPEER, g_ssl_verify_disabled ? 0 : 1) &&
+             setOptInt(CURLOPT_SSL_VERIFYHOST, g_ssl_verify_disabled ? 0 : 2);
+        const char* configured = std::getenv("SSL_CERT_FILE");
+        const char* paths[] = {configured, "/usr/local/android/cert.pem",
+                               "/system/etc/security/cacert.pem"};
+        for (const char* path : paths) {
+            if (path && *path && std::ifstream(path).good()) {
+                ok = ok && setOptStr(CURLOPT_CAINFO, path);
+                break;
+            }
+        }
+    }
 }
 
 CurlEasy::~CurlEasy() {
@@ -49,16 +62,16 @@ bool CurlEasy::setOptInt(int opt, int val) {
     if (!handle) return false;
     void* lib = getCurl();
     if (!lib) return false;
-    typedef int (*curl_easy_setopt_t)(void*, int, int);
+    typedef int (*curl_easy_setopt_t)(void*, int, ...);
     curl_easy_setopt_t setopt = (curl_easy_setopt_t)dlsym(lib, "curl_easy_setopt");
-    return setopt && setopt(handle, opt, val) == 0;
+    return setopt && setopt(handle, opt, static_cast<long>(val)) == 0;
 }
 
 bool CurlEasy::setOptStr(int opt, const char* str) {
     if (!handle) return false;
     void* lib = getCurl();
     if (!lib) return false;
-    typedef int (*curl_easy_setopt_t)(void*, int, const char*);
+    typedef int (*curl_easy_setopt_t)(void*, int, ...);
     curl_easy_setopt_t setopt = (curl_easy_setopt_t)dlsym(lib, "curl_easy_setopt");
     return setopt && setopt(handle, opt, str) == 0;
 }
@@ -89,8 +102,7 @@ long CurlEasy::getResponseCode() {
     curl_easy_getinfo_t gi = (curl_easy_getinfo_t)dlsym(lib, "curl_easy_getinfo");
     if (!gi) return -1;
     long code = 0;
-    gi(handle, CURLINFO_RESPONSE_CODE, &code);
-    return code;
+    return gi(handle, CURLINFO_RESPONSE_CODE, &code) == 0 ? code : -1;
 }
 
 CurlSlist::~CurlSlist() {
@@ -184,8 +196,6 @@ std::string AppleApi::getDevToken() {
     curl.setOptStr(CURLOPT_URL, "https://music.apple.com");
     curl.setOptPtr(CURLOPT_WRITEFUNCTION, (void*)&writeCallback);
     curl.setOptPtr(CURLOPT_WRITEDATA, &html);
-    curl.setOptInt(CURLOPT_SSL_VERIFYPEER, 0);
-    curl.setOptInt(CURLOPT_SSL_VERIFYHOST, 0);
     curl.setOptInt(CURLOPT_FOLLOWLOCATION, 1);
     curl.setOptInt(CURLOPT_TIMEOUT_MS, 15000);
     curl.setOptStr(CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
@@ -205,8 +215,6 @@ std::string AppleApi::getDevToken() {
     jsCurl.setOptStr(CURLOPT_URL, ("https://music.apple.com" + jsPath).c_str());
     jsCurl.setOptPtr(CURLOPT_WRITEFUNCTION, (void*)&writeCallback);
     jsCurl.setOptPtr(CURLOPT_WRITEDATA, &js);
-    jsCurl.setOptInt(CURLOPT_SSL_VERIFYPEER, 0);
-    jsCurl.setOptInt(CURLOPT_SSL_VERIFYHOST, 0);
     jsCurl.setOptInt(CURLOPT_FOLLOWLOCATION, 1);
     jsCurl.setOptInt(CURLOPT_TIMEOUT_MS, 15000);
     jsCurl.setOptStr(CURLOPT_ACCEPT_ENCODING, "");
@@ -306,8 +314,6 @@ std::string AppleApi::getLyrics(const std::string& adamId,
     curl.setOptStr(CURLOPT_URL, url.c_str());
     curl.setOptPtr(CURLOPT_WRITEFUNCTION, (void*)&writeCallback);
     curl.setOptPtr(CURLOPT_WRITEDATA, &resp);
-    curl.setOptInt(CURLOPT_SSL_VERIFYPEER, 0);
-    curl.setOptInt(CURLOPT_SSL_VERIFYHOST, 0);
     curl.setOptInt(CURLOPT_TIMEOUT_MS, 15000);
     curl.setOptStr(CURLOPT_USERAGENT, "Music/5.7 Android/10 model/Pixel6GR1YH build/1234 (dt:66)");
 
@@ -319,7 +325,7 @@ std::string AppleApi::getLyrics(const std::string& adamId,
 
     if (!curl.perform()) { LOG_WARN("lyrics curl perform failed"); return ""; }
     long lstatus = curl.getResponseCode();
-    if (lstatus != 200 && lstatus != 0) {
+    if (lstatus != 200) {
         LOG_WARN("lyrics http status=%ld body=%.300s", lstatus, resp.c_str());
         return "";
     }
@@ -375,8 +381,6 @@ std::string AppleApi::getWebPlayback(const std::string& adamId,
     curl.setOptStr(CURLOPT_URL, "https://play.music.apple.com/WebObjects/MZPlay.woa/wa/webPlayback");
     curl.setOptPtr(CURLOPT_WRITEFUNCTION, (void*)&writeCallback);
     curl.setOptPtr(CURLOPT_WRITEDATA, &resp);
-    curl.setOptInt(CURLOPT_SSL_VERIFYPEER, 0);
-    curl.setOptInt(CURLOPT_SSL_VERIFYHOST, 0);
     curl.setOptInt(CURLOPT_TIMEOUT_MS, 15000);
     curl.setOptStr(CURLOPT_POSTFIELDS, postBody.c_str());
     curl.setOptInt(CURLOPT_POST, 1);
@@ -394,7 +398,7 @@ std::string AppleApi::getWebPlayback(const std::string& adamId,
 
     if (!curl.perform()) { LOG_WARN("webplayback curl perform failed"); return ""; }
     long wstatus = curl.getResponseCode();
-    if (wstatus != 200 && wstatus != 0) {
+    if (wstatus != 200) {
         LOG_WARN("webplayback http status=%ld body=%.300s", wstatus, resp.c_str());
         return "";
     }
@@ -476,8 +480,6 @@ bool AppleApi::getLicense(const std::string& adamId,
     curl.setOptStr(CURLOPT_URL, "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense");
     curl.setOptPtr(CURLOPT_WRITEFUNCTION, (void*)&writeCallback);
     curl.setOptPtr(CURLOPT_WRITEDATA, &resp);
-    curl.setOptInt(CURLOPT_SSL_VERIFYPEER, 0);
-    curl.setOptInt(CURLOPT_SSL_VERIFYHOST, 0);
     curl.setOptInt(CURLOPT_TIMEOUT_MS, 15000);
     curl.setOptStr(CURLOPT_POSTFIELDS, postBody.c_str());
     curl.setOptInt(CURLOPT_POST, 1);
@@ -493,10 +495,7 @@ bool AppleApi::getLicense(const std::string& adamId,
     long lcode = curl.getResponseCode();
     LOG_DEBUG("license: dev=%.24s... music=%.24s... uri=%.60s",
               devToken.c_str(), musicToken.c_str(), uri.c_str());
-    /* The dlopen'd libcurl reports 0 instead of 200 here (same as lyrics and
-       webplayback, which both tolerate 0); a strict `!= 200` check wrongly
-       rejects a successful license. */
-    if (lcode != 200 && lcode != 0) {
+    if (lcode != 200) {
         LOG_WARN("license http status=%ld body=%.300s", lcode, resp.c_str());
         return false;
     }

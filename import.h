@@ -247,6 +247,9 @@ _ZN21SVFootHillSessionCtrl14decryptContextERKNSt6__ndk112basic_stringIcNS0_11cha
 	struct shared_ptr *ret, void *sessCtrlInstance, union std_string *ckc);
 IMPORT_EXTERN void _ZNSt6__ndk110shared_ptrI18SVFootHillPContextED2Ev(struct shared_ptr *);
 IMPORT_EXTERN void _ZNSt6__ndk119__shared_weak_count16__release_sharedEv(void *);
+IMPORT_EXTERN void _ZNSt6__ndk112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEED2Ev(union std_string *);
+IMPORT_EXTERN void _ZN17storeservicescore15PurchaseRequestD2Ev(void *);
+IMPORT_EXTERN void _ZN17storeservicescore10URLRequestD2Ev(void *);
 IMPORT_EXTERN void **_ZNK18SVFootHillPContext9kdContextEv(void *);
 IMPORT_EXTERN long NfcRKVnxuKZy04KWbdFu71Ou(void *, uint32_t, void *, void *, size_t);
 
@@ -279,6 +282,7 @@ IMPORT_EXTERN void _ZN13mediaplatform11HTTPMessage9setHeaderERKNSt6__ndk112basic
 IMPORT_EXTERN void _ZN13mediaplatform11HTTPMessage11setBodyDataEPcm(void *,char *, u_long);
 IMPORT_EXTERN void *_ZN17storeservicescore10DeviceGUID4guidEv(void *, void *);
 IMPORT_EXTERN char *_ZNK13mediaplatform4Data5bytesEv(void *);
+IMPORT_EXTERN size_t _ZNK13mediaplatform4Data6lengthEv(void *);
 IMPORT_EXTERN void *_ZN17storeservicescore10URLRequestC2ERKNSt6__ndk110shared_ptrIN13mediaplatform11HTTPMessageEEERKNS2_INS_14RequestContextEEE(void *, struct shared_ptr *, struct shared_ptr *);
 IMPORT_EXTERN void *_ZN17storeservicescore10URLRequest19setRequestParameterERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_(void *, union std_string *, union std_string *);
 IMPORT_EXTERN void *_ZN17storeservicescore10URLRequest3runEv(void *);
@@ -296,7 +300,7 @@ IMPORT_EXTERN struct shared_ptr *_ZN17storeservicescore16PurchaseResponse5errorE
 IMPORT_EXTERN struct std_vector _ZNK17storeservicescore16PurchaseResponse5itemsEv(void *);
 IMPORT_EXTERN struct std_vector _ZNK17storeservicescore12PurchaseItem6assetsEv(void *);
 IMPORT_EXTERN union std_string *_ZNK17storeservicescore13PurchaseAsset3URLEv(void *, void *);
-IMPORT_EXTERN int _ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(void *);
+IMPORT_EXTERN const int *_ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(void *);
 IMPORT_EXTERN const char *_ZNK17storeservicescore19StoreErrorCondition4whatEv(void *);
 IMPORT_EXTERN struct shared_ptr *_ZNK17storeservicescore20AuthenticateResponse5errorEv(void *);
 IMPORT_EXTERN union std_string *_ZNK17storeservicescore20AuthenticateResponse15customerMessageEv(void *);
