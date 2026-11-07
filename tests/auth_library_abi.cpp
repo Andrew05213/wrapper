@@ -41,6 +41,8 @@ static std::string plist_string(const void* dictionary, const char* name) {
     return buffer;
 }
 
+#include "auth_interaction_library_abi.h"
+
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
     Logger::get().configure(LogLevel::Debug, "", 0);
@@ -144,6 +146,7 @@ int main() {
             assert(!_ZN17storeservicescore16AuthenticateFlow34_shouldRetryAfterIncorrectPasswordERKNSt6__ndk110shared_ptrINS_20AuthenticateResponseEEE(flow.value.obj, &response));
             assert(last_auth_outcome() == AuthOutcome::AuthenticationFailed);
             assert(auth_events.back().type == AuthEventType::AuthenticationFailurePrompt);
+            check_native_ui_retry(flow.value.obj, &response);
             { std::lock_guard<std::mutex> lock(auth_state_mutex); auth_active = false; }
         }
         // These destructors are inlined in the library; release the verified
@@ -159,5 +162,6 @@ int main() {
             if (p->ctrl_blk) _ZNSt6__ndk119__shared_weak_count16__release_sharedEv(p->ctrl_blk);
         }
     }
+    check_native_ui(flow.value.obj);
     puts("AUTH_ABI_PASSED: native dialog, request credentials/POST/attempt/GUID/cookies/UA, protocol and HTTP fields");
 }

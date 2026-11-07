@@ -1,7 +1,201 @@
 # Lite authentication diagnostics and AMDL handoff
 
-This change is based on `work` at `15fe0cb75b866e7460bf8d28d155e813a870e076`.
-It fixes local credential handling and response classification. It does not
+## Native interaction protocol v1 (shared wrapper/downloader contract)
+
+This protocol is independent of `AuthEvent`; its existing event IDs and numeric,
+redacted payload are unchanged. UI text and answers must never be appended to
+diagnostic events, logs, stderr, exception text or persistent caches. It adds
+interaction capability, not a fix for Apple's real-account `-5000` rejection.
+
+The public C++ value types and functions live in `lite/auth_interaction.h`:
+
+* `set_auth_interaction_handler(handler, timeout_ms)` installs an owned
+  `std::function<void(AuthInteractionRequest)>`. Capture a `shared_ptr` to an
+  adapter/session when its lifetime needs extending. An empty handler unregisters.
+  Timeout defaults to 120000 ms; valid values are 10..300000 ms.
+* `submit_auth_interaction_response(response)` accepts a value response and
+  returns a fixed validation result. `cancel_auth_interaction(attempt_id)` cancels
+  the current wrapper attempt, including while it is between UI requests.
+  `current_auth_interaction_attempt()` returns its ID (zero when inactive), so an
+  adapter can sample it on Started and cancel before the first prompt.
+* `login(ctx, downstream_attempt_id)` associates a caller-supplied numeric attempt
+  token with the new wrapper attempt. The original `login(ctx)` remains available
+  and supplies token zero. No new field is added to diagnostic events.
+
+A request contains `protocol_version=1`, `attempt_id`, `downstream_attempt_id`,
+`request_id`, a fixed interaction kind, title/message, buttons and input fields.
+`expires_after_ms` is the remaining monotonic deadline when dispatch starts;
+transport/UI delays consume it and never extend the server deadline.
+Kinds are AccountChoice, AuthenticationFailure, ProtocolDialog, Credentials,
+VerificationCode and Unsupported. Each button has an opaque numeric ID, label,
+role and enabled flag. Each field has an opaque numeric ID, a supported native
+input type, label, required flag and byte-length/digit constraints. No request
+contains SDK pointers, addresses, callable actions or URLs to execute. Wrapper
+never adds passwords, previous answers, tokens or default secret values to these
+requests; server-provided display text can itself be private. Text containing a URL is
+inert display text; adapters must not turn it into an automatic navigation or
+system action.
+
+A response echoes version, attempt ID and request ID and chooses Submit, Cancel
+or Unsupported. Submit contains exactly one offered, enabled button ID and only
+offered field IDs, each at most once. Non-cancel submissions must satisfy the
+offered constraints; cancel buttons require no inputs. Cancel/Unsupported carry
+no button or input values. Wrong IDs, extra/duplicate fields, disabled buttons,
+invalid lengths, embedded NUL, unknown protocol versions and malformed responses
+are rejected without completing or extending the pending request. A valid answer
+is accepted once. Subsequent, late and expired answers are rejected. Unsupported
+requests can only be acknowledged/cancelled and never perform an SDK action.
+Accepted means validated and queued, not authentication success: the answer is
+used only after the dispatch function has returned normally. An exception,
+unregistration or blocked dispatch after submitting can still fail/timeout it.
+
+Wrapper attempt IDs and all request/item IDs are monotonically allocated,
+nonzero and never reused within a process. They are identifiers, not capabilities
+for accessing SDK memory. An attempt begins at an accepted `login` and ends
+before its Completed event. Request IDs are valid only while that attempt's one
+pending interaction is waiting; no response can be applied to the next dialog
+or next attempt. Downstream must additionally scope messages to its owned login
+child/session: counters can restart in a different process or after a fork.
+The echoed `downstream_attempt_id` in requests lets its adapter correlate UI with
+the parent attempt; the parent must never route answers into another child's IPC
+stream. Do not compare IDs across sessions or infer button roles from numbers.
+
+All input/labels are UTF-8. Limits in bytes: title 1024, message 8192, button/field
+labels 512, account 512, ordinary/secret field 4096, six-digit verification code
+6. At most 16 buttons and 16 fields are offered; combined request display text
+is capped at 24576 bytes and combined response input at 16384 bytes. Oversized,
+invalid UTF-8 or incomplete SDK metadata yields an Unsupported notice with
+bounded available display text, not truncated actionable inputs. Numeric IDs
+are fixed-width integers; adapters serializing to JavaScript must preserve uint64
+exactly (for example, decimal strings on their private transport).
+
+Supported SDK adaptations are:
+
+* The pinned native local account chooser: only existing-account and cancel
+  choices are enabled. Account creation needs an unsupported external flow.
+* The pinned Cancel/Retry failure prompt: Retry runs only after that exact button
+  was explicitly selected. Cancel terminates the attempt; server rejection is
+  not relabelled as an incorrect password or a verification challenge.
+* Generic ProtocolDialog kind 0 with ordinary/secure text, email keyboard or numeric keyboard
+  fields and inert/authentication-only buttons. Field types come from SDK flags
+  and verified keyboard enums, never English labels. Protocol fields are required
+  by this native adapter because the SDK exposes no server required/optional
+  metadata. The UI must show that constraint rather than silently omit a field.
+* CredentialsRequest: account/password for a normal request; only a fresh code
+  when `requiresHSA2VerificationCode` is set and original credentials are present.
+  Original passwords remain separate; only the current code is appended for one
+  SDK submission. Raw credentials are not prefilled into interaction requests.
+
+Unknown keyboard/field types, biometric/web-only steps, unsafe/default actions
+(including open URL, purchase, reset or create account), invalid SDK shapes and
+over-limit payloads are Unsupported. Preserve bounded available title/message
+for UI display and acknowledge the unsupported result explicitly. No browser,
+shell, arbitrary URL handler or action execution API is provided.
+
+The SDK callback keeps its original request and completion handler alive on the
+authentication thread until it returns. Wrapper retains owning references where
+needed and completes exactly once on that thread, with the selected SDK button,
+text-field response map or CredentialsResponse. Only copied UI values cross into
+the downstream worker; no SDK object/completion runs there. The wrapper/SDK's
+response setters copy submitted strings. Wrapper-owned answer and temporary
+credential buffers are overwritten when consumed or retired; adapters must also
+clear their controls/queues and discard copied text/answers after completion.
+The closed SDK may retain its own in-flight copies; wrapper adds no answer cache.
+
+No wrapper mutex is held when invoking downstream code or waiting for an answer.
+Dispatch uses bounded detached workers (maximum eight outstanding invocations).
+This also bounds SDK waiting if a handler fails to return. Replacement or
+unregistration retires the old pending request immediately; cancellation,
+deadline expiry and handler exceptions wake the authentication thread and submit
+one SDK cancellation. A stuck handler cannot be forcibly killed in portable C++:
+its owned function/session and copied UI request can outlive the deadline, but
+never hold SDK references. Adapters must return promptly after enqueueing UI work,
+honor invalidation by attempt/request ID and release their copies. At the worker
+limit, fail explicitly rather than create unbounded threads. Destruction of old
+handler captures also occurs outside wrapper mutexes and may reenter registration.
+Timed-out invocations can overlap later attempts; protect the adapter's queue
+and use per-request owned state rather than unsynchronized mutable captures.
+
+After an attempt is cancelled/retired, later SDK callbacks cannot resume it.
+Timeout and handler disappearance produce distinct final outcomes; an unsupported
+step remains Unsupported rather than a generic login rejection. These failures
+override any later native success. Invalid unsolicited responses do not cancel a
+legitimate pending request; its original finite deadline still applies.
+`AuthOutcome::InteractionTimedOut=11` and `InteractionUnavailable=12` are appended;
+existing outcome/event IDs retain their values. Handler exceptions are InternalError,
+explicit cancellation is Cancelled and unsupported steps are UnsupportedDialog.
+Cancellation immediately wakes a pending UI wait; between prompts it marks the
+attempt terminal. It cannot retract an SDK completion/network operation already
+committed; subsequent SDK callbacks are cancelled and final success is suppressed.
+This API does not replace the SDK's own network transport timeout/cancellation.
+
+When no interaction handler was registered for the attempt, existing CLI account
+selection and code-provider/file/terminal behavior is retained. Once a UI handler
+has taken ownership of an attempt, its loss never silently falls back to CLI or
+auto-selection. AuthEvent observers remain independent and receive no UI text.
+
+Downloader integration (in its own repository):
+
+1. Rebuild/re-pin this wrapper and its guest, retaining the existing device
+   binding/identity setup and strict TLS configuration.
+2. Register an owned interaction handler before `login`, forwarding copied
+   requests over the private child/session transport to the native UI. Use
+   `login(ctx, parent_attempt_token)` for correlation.
+3. Display title/message in native **plain-text** mode (disable rich-text guessing,
+   automatic links/image loading), enabled buttons and typed inputs; show
+   Unsupported notices clearly. Never auto-select Retry/terms or infer types
+   from labels. Keep the diagnostic event stream separate.
+4. On a user action, submit the exact request/attempt IDs and offered button/field
+   IDs. Handle fixed validation results; never retry stale responses into a new
+   prompt. On window/attempt closure, cancel it and discard its queued UI.
+5. Unregister on adapter shutdown. Keep session ownership in handler captures so
+   any already-started dispatch remains safe. Do not persist or log UI requests
+   or responses, even for debugging.
+
+Example integration (the adapter/session and UI queue belong to the downloader):
+
+```cpp
+// Register in the authentication process before login (after any fork).
+// An owned session can outlive an invalidated callback.
+set_auth_interaction_handler([session](AuthInteractionRequest request) {
+    session->postToNativeUI(std::move(request)); // Queue a value, then return.
+}, 120000);
+bool authenticated = login(ctx, session->attemptToken());
+set_auth_interaction_handler({});
+```
+
+On an explicit UI action, on any thread:
+
+```cpp
+AuthInteractionResponse response;
+response.attempt_id = displayed.attempt_id;
+response.request_id = displayed.request_id;
+response.disposition = AuthInteractionDisposition::Submit;
+response.button_id = explicitly_selected.id;
+for (const auto& field : displayed.fields) {
+    AuthInteractionValue value;
+    value.field_id = field.id;
+    value.value = native_controls.read(field.id); // Preserve bytes; never trim passwords.
+    response.values.push_back(std::move(value));
+}
+auto accepted = submit_auth_interaction_response(std::move(response));
+// Accepted only acknowledges validation. Await Completed(AuthOutcome), not SDK enums.
+```
+
+For a cancel button or window closure, use disposition Cancel with no button ID
+or values (or `cancel_auth_interaction(displayed.attempt_id)` for the whole attempt).
+For Unsupported, show bounded available text and submit disposition Unsupported
+without fields/buttons. Close stale UI on attempt completion/cancellation; reject
+transport messages from a different child/session. Clear native input controls and
+discard retained request/response copies after use. Move responses into the API
+to avoid unnecessary plaintext copies; each owned response value is wiped on
+destruction. The registration captures and their destructors must obey ordinary
+C++ exception/lifetime rules; never unload their code while invocations remain.
+
+The native interaction interface is based on `work` at
+`a131c66457cea72c9f12a9ee6aacd1edd902143c`; the earlier diagnostic audit below
+started at `15fe0cb75b866e7460bf8d28d155e813a870e076`. These changes fix local
+credential handling, response classification and the UI handoff. They do not
 establish why Apple's server rejected a particular account, and does not claim
 that successful Windows/web authentication guarantees this Android Store flow
 will accept the same exchange.
@@ -51,7 +245,7 @@ read, and the token cache is successfully saved. Token persistence failure is
 `login_token_cache_failed` and a nonzero exit. Callers must wait for process
 completion rather than infer login completion from an intermediate event.
 
-## Dialog and code handling
+## Legacy CLI dialog and code handling (no interaction handler)
 
 The local initial dialog in this library is kind `2`, has no input fields, and
 has three actionless buttons in this order: existing account, create account,
@@ -207,6 +401,10 @@ cover protocol-code distinctions, reference-return ABI mocks, actual HTTP
 status separation, unknown/non-English dialogs, malformed input, special and
 long passwords, repeated challenges, cancellation, exceptions, false success,
 and token cache write failure. Existing memory/TLS/QEMU launcher checks remain.
+The two native-UI host fixtures also cover request IDs and rejected responses,
+sequential interactions, explicit Retry, cancellation, deadlines, handler loss,
+reentrant destruction, exceptions after submission, bounded workers, copied
+request lifetimes, field maps and absence of UI text/inputs in logs.
 
 Build with `ANDROID_NDK_PATH=/path/to/ndk bash tests/build_auth_guest.sh` after
 building lite. `tests/auth_library_abi.cpp` runs offline inside QEMU with the real
@@ -215,6 +413,15 @@ verifies the local native dialog callback, real generated request plist,
 stable GUID/cookie storage, configured User-Agent, both native `-5000` mappings,
 and actual HTTP status extraction. The HTTPResponse status member is at +128;
 this is pinned to the included x86_64 library, not a general C++ ABI contract.
+`tests/auth_interaction_library_abi.h` extends that fixture with the real
+presentation interface and completion handlers: native account selection,
+Cancel/Retry, non-English text fields, an unknown keyboard type, credentials and
+two code challenges. It checks owning references and exactly-once callbacks.
+`CredentialsRequest::okButtonAction()` returns a borrowed shared-pointer member,
+not a string. `dialog()` returns an owning shared pointer via hidden sret;
+`ProtocolDialogResponse::valueForTextField()` returns an owning string via hidden
+sret. Native keyboard values 0/1/2 mean ordinary/email/numeric; others remain
+unsupported rather than indexing the SDK's unchecked keyboard conversion table.
 
 The library hashes used for this audit are:
 

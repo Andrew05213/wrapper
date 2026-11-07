@@ -2,6 +2,9 @@
 #include <cassert>
 #include <sys/stat.h>
 
+bool auth_handle_dialog_interaction(long, struct shared_ptr*, struct shared_ptr*) { return false; }
+bool auth_handle_credentials_interaction(struct shared_ptr*, struct shared_ptr*) { return false; }
+
 char* amUsername = nullptr;
 char* amPassword = nullptr;
 char g_base_dir[256] = {};

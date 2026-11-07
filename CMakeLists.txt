@@ -68,6 +68,8 @@ set(LITE_SOURCE
     lite/lite_main.cpp
     lite/bridge.cpp
     lite/auth.cpp
+    lite/auth_interaction.cpp
+    lite/auth_sdk_interaction.cpp
     lite/playback.cpp
     lite/tokens.cpp
     lite/apple_api.cpp

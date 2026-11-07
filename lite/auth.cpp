@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <vector>
 #include <atomic>
+#include <stdexcept>
 
 namespace {
 std::mutex auth_state_mutex;
@@ -109,9 +110,31 @@ AuthDialogOrigin set_auth_dialog_origin(AuthDialogOrigin origin) {
     return previous;
 }
 
+AuthDialogOrigin auth_dialog_origin() {
+    std::lock_guard<std::mutex> lock(auth_state_mutex); return dialog_origin;
+}
+
 AuthOutcome last_auth_outcome() {
     std::lock_guard<std::mutex> lock(auth_state_mutex);
     return outcome;
+}
+
+void auth_notify_interaction_event(AuthEventType type, const AuthNumber& kind, const AuthNumber& failure) {
+    auto event = auth_event_snapshot(type);
+    event.dialog_kind = kind; event.dialog_failure_type = failure;
+    dispatch_auth_event(event);
+}
+
+void auth_note_interaction_failure(AuthInteractionResult result) {
+    auth_interaction_retire(result);
+    switch (result) {
+    case AuthInteractionResult::Cancelled: callback_failure(AuthOutcome::Cancelled); break;
+    case AuthInteractionResult::Unsupported: callback_failure(AuthOutcome::UnsupportedDialog); break;
+    case AuthInteractionResult::TimedOut: callback_failure(AuthOutcome::InteractionTimedOut); break;
+    case AuthInteractionResult::Unavailable: callback_failure(AuthOutcome::InteractionUnavailable); break;
+    case AuthInteractionResult::HandlerFailed: callback_failure(AuthOutcome::InternalError); break;
+    default: break;
+    }
 }
 
 void auth_response_observed(void* response, struct shared_ptr* url_response) {
@@ -128,6 +151,7 @@ void auth_response_observed(void* response, struct shared_ptr* url_response) {
 }
 
 void dialogHandler(long j, struct shared_ptr* dialog, struct shared_ptr* handler) {
+    if (auth_interaction_handles_attempt() && auth_handle_dialog_interaction(j, dialog, handler)) return;
     (void)handler;
     auto* storage = static_cast<unsigned char*>(calloc(1, 72));
     if (!storage) throw std::bad_alloc();
@@ -201,6 +225,7 @@ void dialogHandler(long j, struct shared_ptr* dialog, struct shared_ptr* handler
 }
 
 void credentialHandler(struct shared_ptr* request, struct shared_ptr* handler) {
+    if (auth_interaction_handles_attempt() && auth_handle_credentials_interaction(request, handler)) return;
     (void)handler;
     LOG_INFO("credentials_requested");
     dispatch_auth_event(auth_event_snapshot(AuthEventType::CredentialsRequested));
@@ -249,7 +274,9 @@ void set_credentials(const char* user, const char* pass) {
     amPassword = new_pass;
 }
 
-bool login(struct shared_ptr ctx) {
+bool login(struct shared_ptr ctx) { return login(ctx, 0); }
+
+bool login(struct shared_ptr ctx, uint64_t downstream_attempt_id) {
     // A callback can query state, replace itself, or attempt login again. Do not
     // keep a serialization mutex locked across user code or start a second flow.
     if (login_running.exchange(true)) {
@@ -258,8 +285,10 @@ bool login(struct shared_ptr ctx) {
     }
     struct Finish {
         bool released = false;
+        uint64_t interaction_attempt = 0;
         void release() {
             if (released) return;
+            if (interaction_attempt) auth_interaction_end_attempt(interaction_attempt);
             { std::lock_guard<std::mutex> lock(auth_state_mutex); auth_active = false; }
             login_running.store(false);
             released = true;
@@ -273,6 +302,8 @@ bool login(struct shared_ptr ctx) {
     }
     LOG_INFO("auth_started");
     try {
+        finish.interaction_attempt = auth_interaction_begin_attempt(downstream_attempt_id);
+        if (!finish.interaction_attempt) throw std::runtime_error("auth_interaction_unavailable");
         dispatch_auth_event(auth_event_snapshot(AuthEventType::Started));
         std::string storefront_path = std::string(g_base_dir) + "/STOREFRONT_ID";
         std::string token_path = std::string(g_base_dir) + "/MUSIC_TOKEN";
@@ -301,11 +332,14 @@ bool login(struct shared_ptr ctx) {
         }
         std::lock_guard<std::mutex> lock(auth_state_mutex);
         if (!callback_failed) outcome = classify_auth_response(d);
-        LOG_INFO("%s", auth_event(outcome));
     } catch (...) {
         std::lock_guard<std::mutex> lock(auth_state_mutex);
         outcome = AuthOutcome::InternalError;
         LOG_ERROR("auth_internal_error");
+    }
+    if (finish.interaction_attempt) {
+        auth_note_interaction_failure(auth_interaction_end_attempt(finish.interaction_attempt));
+        finish.interaction_attempt = 0;
     }
     AuthEvent completed;
     completed.type = AuthEventType::Completed;
@@ -318,6 +352,7 @@ bool login(struct shared_ptr ctx) {
     // Native flow owners have already been destroyed. Release the attempt gate
     // before the final notification, allowing a subsequent attempt from it.
     finish.release();
+    LOG_INFO("%s", auth_event(completed.outcome));
     dispatch_auth_event(completed);
     return completed.outcome == AuthOutcome::Success;
 }

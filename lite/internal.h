@@ -5,6 +5,7 @@
 #include <mutex>
 #include <string>
 #include "auth_policy.h"
+#include "auth_interaction_internal.h"
 
 extern void* FHinstance;
 extern struct shared_ptr g_reqCtx;
@@ -31,6 +32,11 @@ AuthOutcome last_auth_outcome();
 void auth_response_observed(void* response, struct shared_ptr* url_response);
 enum class AuthDialogOrigin { Protocol, AccountChoice, FailurePrompt };
 AuthDialogOrigin set_auth_dialog_origin(AuthDialogOrigin origin);
+AuthDialogOrigin auth_dialog_origin();
+bool auth_handle_dialog_interaction(long id, struct shared_ptr* dialog, struct shared_ptr* handler);
+bool auth_handle_credentials_interaction(struct shared_ptr* request, struct shared_ptr* handler);
+void auth_notify_interaction_event(AuthEventType type, const AuthNumber& kind = {}, const AuthNumber& failure = {});
+void auth_note_interaction_failure(AuthInteractionResult result);
 // Downstream stdin transports supply fresh codes without modifying passwords.
 void set_verification_code_provider(bool (*provider)(std::string&));
 void setup_services();

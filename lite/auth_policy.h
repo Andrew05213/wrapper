@@ -18,7 +18,8 @@ struct AuthDiagnostics {
 enum class AuthOutcome {
     Success = 0, AuthenticationFailed = 1, VerificationRequired = 2, Cancelled = 3,
     UnsupportedDialog = 4, InvalidCredentials = 5, InvalidVerificationCode = 6,
-    TransportFailed = 7, MissingResponse = 8, UnexpectedResponse = 9, InternalError = 10
+    TransportFailed = 7, MissingResponse = 8, UnexpectedResponse = 9, InternalError = 10,
+    InteractionTimedOut = 11, InteractionUnavailable = 12
 };
 
 inline const char* auth_event(AuthOutcome outcome) {
@@ -34,6 +35,8 @@ inline const char* auth_event(AuthOutcome outcome) {
     case AuthOutcome::MissingResponse: return "auth_missing_response";
     case AuthOutcome::UnexpectedResponse: return "auth_unexpected_response";
     case AuthOutcome::InternalError: return "auth_internal_error";
+    case AuthOutcome::InteractionTimedOut: return "auth_interaction_timed_out";
+    case AuthOutcome::InteractionUnavailable: return "auth_interaction_unavailable";
     }
     return "auth_unexpected_response";
 }

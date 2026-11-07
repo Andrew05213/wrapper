@@ -8,6 +8,7 @@
 #include <mutex>
 #include "auth_policy.h"
 #include "auth_events.h"
+#include "auth_interaction.h"
 
 /* ---- JSON response helpers ---- */
 struct LiteResponse {
@@ -106,6 +107,7 @@ extern bool g_code_from_file;
 void install_hooks();
 struct shared_ptr init_ctx();
 bool login(struct shared_ptr ctx);
+bool login(struct shared_ptr ctx, uint64_t downstream_attempt_id);
 AuthOutcome last_auth_outcome();
 void set_device_info(const char* device_info);
 void set_base_dir(const char* dir);

@@ -18,6 +18,13 @@ Each C++ fixture has a 120-second timeout, including reentrant authentication
 event tests (registration, state queries, nested attempts, handler exceptions,
 presence flags, dialog events, code-provider ordering and final outcomes).
 
+Two further fixtures exercise interaction v1: `auth_interaction.cpp` checks
+correlation, invalid/stale/duplicate replies, constraints, sequential requests,
+cancel/deadline/unregistration, dispatch exceptions, reentrant capture destruction
+and the worker limit. `auth_sdk_interaction.cpp` uses SDK boundary mocks to check
+explicit local/Retry choices, field maps, credentials/repeated codes, object
+references, single-thread/exactly-once completion, failure latching and privacy.
+
 In a sandbox that prevents LeakSanitizer from inspecting processes, run
 `ASAN_OPTIONS=detect_leaks=0 bash tests/run_checks.sh`. AddressSanitizer,
 UndefinedBehaviorSanitizer and the explicit owner-count assertions still run.
@@ -88,3 +95,9 @@ initramfs, excludes local account data, disables networking and persistent
 disks, and fails on a fixture error, timeout or private sentinel in debug logs.
 `offline-checks.yml` runs this plus host regressions on work/lite pushes and PRs;
 guest logs are uploaded even on failure.
+
+The authentication ABI fixture also uses the real SDK presentation interface,
+provided completion bases, text-field response map, CredentialsRequest/Response
+constructors and code challenges. It verifies UI-selected Retry and native
+ownership without running AuthenticateFlow's network request. The guest remains
+network-disabled, account-free and ephemeral.

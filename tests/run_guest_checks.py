@@ -69,7 +69,7 @@ echo AUTH_EXIT=$?
             raise SystemExit('Guest ABI checks timed out; see the guest log')
         log = args.log.read_text(errors='replace')
         if result.returncode or any(marker not in log for marker in (
-                '10000 Android ABI ownership cycles passed', 'AUTH_ABI_PASSED',
+                '10000 Android ABI ownership cycles passed', 'AUTH_ABI_PASSED', 'NATIVE_UI_ABI_PASSED',
                 'OWNERSHIP_EXIT=0', 'AUTH_EXIT=0')):
             raise SystemExit('Guest ABI checks failed; see the guest log')
         if any(secret in log for secret in ('SECRET', 'fixture@example.invalid', '123456', '987654')):

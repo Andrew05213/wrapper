@@ -153,6 +153,19 @@ IMPORT_EXTERN union std_string *_ZNK17storeservicescore14ProtocolDialog7messageE
 IMPORT_EXTERN union std_string *_ZNK17storeservicescore18CredentialsRequest5titleEv(void *);
 IMPORT_EXTERN union std_string *_ZNK17storeservicescore18CredentialsRequest7messageEv(void *);
 IMPORT_EXTERN uint8_t _ZNK17storeservicescore18CredentialsRequest28requiresHSA2VerificationCodeEv(void *);
+// Borrowed string getters; dialog() returns an owning shared_ptr via hidden sret.
+IMPORT_EXTERN union std_string *_ZNK17storeservicescore18CredentialsRequest13okButtonTitleEv(void *);
+IMPORT_EXTERN union std_string *_ZNK17storeservicescore18CredentialsRequest17cancelButtonTitleEv(void *);
+// okButtonAction() is a borrowed shared_ptr member, NOT a string.
+IMPORT_EXTERN struct shared_ptr *_ZNK17storeservicescore18CredentialsRequest14okButtonActionEv(void *);
+IMPORT_EXTERN void _ZNK17storeservicescore18CredentialsRequest6dialogEv(void *, void *);
+IMPORT_EXTERN uint8_t _ZNK17storeservicescore14ProtocolDialog29allowsBiometricAuthenticationEv(void *);
+IMPORT_EXTERN int _ZNK17storeservicescore17ProtocolTextField12keyboardTypeEv(void *);
+IMPORT_EXTERN uint8_t _ZNK17storeservicescore17ProtocolTextField8isSecureEv(void *);
+IMPORT_EXTERN union std_string *_ZNK17storeservicescore17ProtocolTextField5labelEv(void *);
+IMPORT_EXTERN void _ZN17storeservicescore22ProtocolDialogResponse17setTextFieldValueERKNSt6__ndk110shared_ptrINS_17ProtocolTextFieldEEERKNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(void *, struct shared_ptr *, union std_string *);
+// valueForTextField returns an owning string by hidden sret, not a member reference.
+IMPORT_EXTERN void _ZN17storeservicescore22ProtocolDialogResponse17valueForTextFieldERKNSt6__ndk110shared_ptrINS_17ProtocolTextFieldEEE(void *, void *, struct shared_ptr *);
 
 IMPORT_EXTERN void
 _ZN20androidstoreservices28AndroidPresentationInterface28handleProtocolDialogResponseERKlRKNSt6__ndk110shared_ptrIN17storeservicescore22ProtocolDialogResponseEEE(

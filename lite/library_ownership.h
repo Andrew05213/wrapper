@@ -13,6 +13,12 @@ struct library_shared_ptr {
     library_shared_ptr() = default;
     library_shared_ptr(const library_shared_ptr&) = delete;
     library_shared_ptr& operator=(const library_shared_ptr&) = delete;
+    void retain(const struct shared_ptr* borrowed) {
+        if (!borrowed) return;
+        value = *borrowed;
+        if (value.ctrl_blk)
+            __atomic_fetch_add(reinterpret_cast<long*>(value.ctrl_blk) + 1, 1L, __ATOMIC_RELAXED);
+    }
     ~library_shared_ptr() {
         if (value.ctrl_blk)
             _ZNSt6__ndk119__shared_weak_count16__release_sharedEv(value.ctrl_blk);

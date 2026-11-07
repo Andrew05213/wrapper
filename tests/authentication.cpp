@@ -4,6 +4,11 @@
 #include <fstream>
 #include <type_traits>
 
+#ifndef WRAPPER_AUTH_FIXTURE_WITH_INTERACTION
+bool auth_handle_dialog_interaction(long, struct shared_ptr*, struct shared_ptr*) { return false; }
+bool auth_handle_credentials_interaction(struct shared_ptr*, struct shared_ptr*) { return false; }
+#endif
+
 static_assert(std::is_trivially_copyable<AuthEvent>::value, "events must remain value-only snapshots");
 
 char* amUsername = nullptr;
@@ -20,6 +25,7 @@ static int native_type = 0, native_status = 6, store_error = 10;
 static long failure_type = -5000;
 static bool has_error = true, has_response = true, show_unsupported = false, throw_exception = false;
 static bool observe_response = true;
+static void (*flow_script)() = nullptr;
 static char http[136] = {};
 static struct shared_ptr native_response = {&native_type, nullptr};
 static struct shared_ptr url_response = {http, nullptr};
@@ -31,6 +37,10 @@ static struct std_vector buttons = {button_array, button_array + 3, button_array
 static struct std_vector fields = {};
 static int selection = -1;
 static bool default_actions = true;
+static int dialog_completions = 0;
+static std::map<void*, std::string> sdk_field_values, sdk_button_titles;
+static std::map<void*, struct shared_ptr> sdk_actions;
+static std::string sdk_title = "登录", sdk_message = "SECRET-localized-server-message";
 
 extern "C" const void* CFStringCreateWithCString(const void*, const char* text, uint32_t) { return strdup(text); }
 extern "C" void CFRelease(const void* p) { if (p != http) free(const_cast<void*>(p)); }
@@ -56,33 +66,45 @@ extern "C" const int* _ZNK17storeservicescore20AuthenticateResponse6statusEv(voi
 extern "C" struct shared_ptr* _ZNK17storeservicescore20AuthenticateResponse5errorEv(void*) { return has_error ? &error : nullptr; }
 extern "C" const int* _ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(void*) { return &store_error; }
 extern "C" const long* _ZNK17storeservicescore19StoreErrorCondition17externalErrorCodeEv(void*) { return &failure_type; }
-extern "C" void _ZNSt6__ndk119__shared_weak_count16__release_sharedEv(void* p) { free(p); }
+extern "C" void _ZNSt6__ndk119__shared_weak_count16__release_sharedEv(void* p) {
+    auto* count = reinterpret_cast<long*>(p) + 1;
+    if ((*count)-- == 0) free(p);
+}
 extern "C" void _ZNSt6__ndk110shared_ptrIN17storeservicescore16AuthenticateFlowEE11make_sharedIJRNS0_INS1_14RequestContextEEEEEES3_DpOT_(struct shared_ptr* out, struct shared_ptr*) { *out = {http, nullptr}; }
 extern "C" struct shared_ptr* _ZNK17storeservicescore16AuthenticateFlow8responseEv(void*) { return has_response ? &native_response : nullptr; }
 extern "C" void _ZN17storeservicescore16AuthenticateFlow3runEv(void*) {
+    if (flow_script) { flow_script(); return; }
     if (throw_exception) throw std::runtime_error("SECRET-native-exception");
     if (has_response && observe_response) auth_response_observed(native_response.obj, &url_response);
     if (show_unsupported) { struct shared_ptr dialog = {http, nullptr}; dialogHandler(1, &dialog, nullptr); }
 }
-extern "C" void _ZN17storeservicescore22ProtocolDialogResponseC1Ev(void*) { selection = -1; default_actions = true; }
+extern "C" void _ZN17storeservicescore22ProtocolDialogResponseC1Ev(void*) {
+    selection = -1; default_actions = true; sdk_field_values.clear();
+}
 extern "C" void _ZN17storeservicescore22ProtocolDialogResponse31setPerformsDefaultButtonActionsEb(void*, bool value) { default_actions = value; }
 extern "C" int _ZNK17storeservicescore14ProtocolDialog10dialogKindEv(void*) { return kind; }
 extern "C" union std_string* _ZNK17storeservicescore14ProtocolDialog5titleEv(void*) {
-    static union std_string value = new_std_string("登录"); return &value;
+    static union std_string value; value = new_std_string(sdk_title.c_str()); return &value;
 }
 extern "C" union std_string* _ZNK17storeservicescore14ProtocolDialog7messageEv(void*) {
-    static union std_string value = new_std_string("SECRET-localized-server-message"); return &value;
+    static union std_string value; value = new_std_string(sdk_message.c_str()); return &value;
 }
-extern "C" union std_string* _ZNK17storeservicescore14ProtocolButton5titleEv(void*) {
-    static union std_string value = new_std_string("使用现有 Apple ID"); return &value;
+extern "C" union std_string* _ZNK17storeservicescore14ProtocolButton5titleEv(void* p) {
+    const auto found = sdk_button_titles.find(p);
+    static union std_string value;
+    value = new_std_string(found == sdk_button_titles.end() ? "使用现有 Apple ID" : found->second.c_str()); return &value;
 }
 extern "C" long long _ZNK17storeservicescore14ProtocolDialog11failureTypeEv(void*) { return dialog_failure; }
 extern "C" void _ZN17storeservicescore14ProtocolDialog14setFailureTypeEx(void*, long long value) { dialog_failure = value; }
 extern "C" struct std_vector* _ZNK17storeservicescore14ProtocolDialog10textFieldsEv(void*) { return &fields; }
 extern "C" struct std_vector* _ZNK17storeservicescore14ProtocolDialog7buttonsEv(void*) { return &buttons; }
-extern "C" struct shared_ptr* _ZNK17storeservicescore14ProtocolButton6actionEv(void*) { return nullptr; }
+extern "C" struct shared_ptr* _ZNK17storeservicescore14ProtocolButton6actionEv(void* p) {
+    const auto found = sdk_actions.find(p); return found == sdk_actions.end() ? nullptr : &found->second;
+}
 extern "C" void _ZN17storeservicescore22ProtocolDialogResponse17setSelectedButtonERKNSt6__ndk110shared_ptrINS_14ProtocolButtonEEE(void*, struct shared_ptr* button) { selection = static_cast<int>(button - button_array); }
-extern "C" void _ZN20androidstoreservices28AndroidPresentationInterface28handleProtocolDialogResponseERKlRKNSt6__ndk110shared_ptrIN17storeservicescore22ProtocolDialogResponseEEE(void*, long*, struct shared_ptr*) { assert(!default_actions); }
+extern "C" void _ZN20androidstoreservices28AndroidPresentationInterface28handleProtocolDialogResponseERKlRKNSt6__ndk110shared_ptrIN17storeservicescore22ProtocolDialogResponseEEE(void*, long*, struct shared_ptr*) {
+    assert(!default_actions); ++dialog_completions;
+}
 
 struct EventRecorder {
     std::vector<AuthEvent> events;
@@ -130,6 +152,7 @@ static void expect(AuthOutcome expected) {
         }
     } else assert(!final.diagnostics.response_type.present);
 }
+#ifndef WRAPPER_AUTH_FIXTURE_NO_MAIN
 int main() {
     char directory[] = "/tmp/wrapper-auth-XXXXXX";
     assert(mkdtemp(directory));
@@ -212,3 +235,4 @@ int main() {
     remove(log.c_str()); rmdir(directory);
     puts("auth: protocol fields, transport status, dialog cancellation and no false success passed");
 }
+#endif
