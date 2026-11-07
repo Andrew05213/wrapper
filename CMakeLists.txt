@@ -32,7 +32,7 @@ FetchContent_MakeAvailable(cjson)
 FetchContent_Declare(
   dobby
   GIT_REPOSITORY https://github.com/BepInEx/Dobby.git
-  GIT_TAG        master
+  GIT_TAG        9d271803881f467aabfc24593c7dcaeb710fe861
 )
 set(DOBBY_BUILD_TEST OFF CACHE BOOL "" FORCE)
 set(DOBBY_GENERATE_SHARED OFF CACHE BOOL "" FORCE)

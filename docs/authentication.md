@@ -144,6 +144,61 @@ a supplied PET/device-authentication tuple is valid for Apple's Store service.
 
 No AMDL source files, manifests or locks were changed by this work.
 
+## Structured events for desktop adapters
+
+Include `lite/auth_events.h` (also included by `lite/lite.h`) and register
+`set_auth_event_handler(handler, user_data)` before `login()`. If the adapter
+forks a login child, register before the fork or in that child. Registration
+does not provide cross-process IPC: the adapter should serialize the event to
+its existing stdout/private transport or queue a copy for its UI. No parsing
+of stderr or edits to `auth.cpp` are needed. For example, with an adapter-owned
+`publish(const AuthEvent&)` transport:
+
+```cpp
+set_auth_event_handler([](const AuthEvent& event, void* context) {
+    static_cast<DesktopAdapter*>(context)->publish(event);
+}, &adapter);
+```
+
+`AuthEvent` contains only value fields:
+
+* `type`: stable `AuthEventType` values for Started, AccountChoice,
+  ExistingAccountSelected, CredentialsRequested, VerificationCodeRequested,
+  Response, AuthenticationFailurePrompt, UnsupportedDialog and Completed.
+* `diagnostics`: all six `AuthDiagnostics` numeric fields, each with its
+  independent `present` flag. Response events contain that exact response;
+  subsequent events during the attempt carry the latest observed diagnostics.
+  Local responses without HTTP retain missing HTTP/protocol flags.
+* `dialog_kind` and `dialog_failure_type`: optional numbers for dialog events,
+  kept separate from the Store response's protocol failure type.
+* `outcome_present` and `outcome`: the final AuthOutcome on Completed. All other
+  events have `outcome_present=false`; their default outcome is not a result.
+
+No event contains dialog text, an account, password, verification code, token,
+cookie, SDK pointer or response body. Event and outcome enums have explicit
+numeric values. A Started/Completed pair is emitted for each accepted `login()`
+attempt, including missing responses and native exceptions. Callback failures
+cannot convert authentication failure into success. Authentication completion
+still describes the Store exchange, not subsequent token-cache persistence.
+
+Dispatch is synchronous on the emitting thread, with all wrapper mutexes
+released. Handlers can query `last_auth_outcome()`, replace/unregister themselves
+and copy the event. Exceptions from a handler are contained and logged only as
+`auth_event_handler_failed`. Keep handlers short; a verification code is still
+supplied through the separate code-provider API, after its request event.
+An atomic single-attempt gate prevents concurrent/nested active flows: `login()`
+called during an attempt returns false immediately, does not change the active
+attempt's state and emits no recursive event. The gate and native owners are
+released before Completed dispatch, so a handler may start the next attempt
+there. Its new result does not overwrite the previous event or return value.
+
+`set_auth_event_handler(nullptr)` unregisters. Handler/context pairs are copied
+under the state mutex, then called outside it; a dispatch already in flight
+can still use the old pair. The adapter owns `user_data` and must keep it alive
+until such callbacks finish. There is no blocking unregister operation that
+could deadlock a handler unregistering itself. Synchronize an adapter's queue
+if native callbacks can arrive on different threads.
+
 ## Verification and ABI boundary
 
 Run host checks with `ASAN_OPTIONS=detect_leaks=0 bash tests/run_checks.sh` when
@@ -170,3 +225,13 @@ Revalidate enum values, object layouts, reference-return getters, local dialog
 ordering and the observer when updating these libraries. Rebuild the Android
 binary and the downstream guest bundle after repinning. Neither source changes
 alone nor rebuilding only the QEMU launcher updates an installed desktop guest.
+
+The `offline-checks` workflow runs on work/lite pushes, PRs and manual dispatch.
+It verifies `tests/library_hashes.sha256` against the exact tracked runtime file
+set (98 libraries plus linker64), builds lite, runs host sanitizers/HTTP/TLS/
+launcher checks, then both ABI fixtures in a disposable QEMU initramfs with no
+NIC or data disk. Guest logs are retained and checked for private fixture values.
+The packaging workflow also checks the runtime hashes before building artifacts.
+NDK r23b's archive hash is checked in the regression workflow, and Dobby is
+pinned to the tested source commit. Intentional runtime updates must update the
+hash manifest and revalidate the ABI; checksum failure must not be bypassed.

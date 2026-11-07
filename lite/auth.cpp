@@ -7,10 +7,11 @@
 #include <string>
 #include <unistd.h>
 #include <vector>
+#include <atomic>
 
 namespace {
 std::mutex auth_state_mutex;
-std::mutex login_mutex;
+std::atomic<bool> login_running{false};
 AuthDiagnostics observed;
 void* observed_response = nullptr;
 bool auth_active = false;
@@ -18,6 +19,30 @@ AuthOutcome outcome = AuthOutcome::MissingResponse;
 bool callback_failed = false;
 AuthDialogOrigin dialog_origin = AuthDialogOrigin::Protocol;
 bool (*code_provider)(std::string&) = nullptr;
+AuthEventHandler event_handler = nullptr;
+void* event_user_data = nullptr;
+
+AuthEvent auth_event_snapshot(AuthEventType type) {
+    AuthEvent event;
+    event.type = type;
+    std::lock_guard<std::mutex> lock(auth_state_mutex);
+    if (auth_active) event.diagnostics = observed;
+    return event;
+}
+
+void dispatch_auth_event(const AuthEvent& event) {
+    AuthEventHandler handler;
+    void* user_data;
+    {
+        std::lock_guard<std::mutex> lock(auth_state_mutex);
+        handler = event_handler;
+        user_data = event_user_data;
+    }
+    if (handler) {
+        try { handler(event, user_data); }
+        catch (...) { LOG_WARN("auth_event_handler_failed"); }
+    }
+}
 
 void wipe(std::string& s) {
     volatile char* p = s.empty() ? nullptr : &s[0];
@@ -71,6 +96,12 @@ bool read_code(std::string& code) {
 
 void set_verification_code_provider(bool (*provider)(std::string&)) { code_provider = provider; }
 
+void set_auth_event_handler(AuthEventHandler handler, void* user_data) {
+    std::lock_guard<std::mutex> lock(auth_state_mutex);
+    event_handler = handler;
+    event_user_data = handler ? user_data : nullptr;
+}
+
 AuthDialogOrigin set_auth_dialog_origin(AuthDialogOrigin origin) {
     std::lock_guard<std::mutex> lock(auth_state_mutex);
     const auto previous = dialog_origin;
@@ -86,8 +117,14 @@ AuthOutcome last_auth_outcome() {
 void auth_response_observed(void* response, struct shared_ptr* url_response) {
     const AuthDiagnostics d = inspect_auth_response(response, url_response);
     log_diagnostics(d);
-    std::lock_guard<std::mutex> lock(auth_state_mutex);
-    if (auth_active) { observed = d; observed_response = response; }
+    {
+        std::lock_guard<std::mutex> lock(auth_state_mutex);
+        if (auth_active) { observed = d; observed_response = response; }
+    }
+    AuthEvent event;
+    event.type = AuthEventType::Response;
+    event.diagnostics = d;
+    dispatch_auth_event(event);
 }
 
 void dialogHandler(long j, struct shared_ptr* dialog, struct shared_ptr* handler) {
@@ -103,6 +140,7 @@ void dialogHandler(long j, struct shared_ptr* dialog, struct shared_ptr* handler
     // forever. Never perform their default actions or select Retry/terms/URLs.
     _ZN17storeservicescore22ProtocolDialogResponse31setPerformsDefaultButtonActionsEb(response.obj, false);
     int selected = -1;
+    AuthEvent event = auth_event_snapshot(AuthEventType::UnsupportedDialog);
     struct std_vector* buttons = nullptr;
     if (dialog && dialog->obj) {
         AuthDialogOrigin origin;
@@ -114,6 +152,8 @@ void dialogHandler(long j, struct shared_ptr* dialog, struct shared_ptr* handler
             _ZN17storeservicescore14ProtocolDialog14setFailureTypeEx(dialog->obj, 0);
         const int kind = _ZNK17storeservicescore14ProtocolDialog10dialogKindEv(dialog->obj);
         const long long failure = _ZNK17storeservicescore14ProtocolDialog11failureTypeEv(dialog->obj);
+        event.dialog_kind.set(kind);
+        event.dialog_failure_type.set(failure);
         const auto* fields = _ZNK17storeservicescore14ProtocolDialog10textFieldsEv(dialog->obj);
         buttons = _ZNK17storeservicescore14ProtocolDialog7buttonsEv(dialog->obj);
         std::vector<AuthDialogButton> semantics;
@@ -137,18 +177,25 @@ void dialogHandler(long j, struct shared_ptr* dialog, struct shared_ptr* handler
             selected = existing_account_button(kind, failure, fields && fields->begin != fields->end, semantics);
         LOG_INFO("auth_dialog_kind=%d", kind);
         LOG_INFO("auth_dialog_failure_type=%lld", failure);
+        if (origin == AuthDialogOrigin::AccountChoice) {
+            event.type = AuthEventType::AccountChoice;
+            dispatch_auth_event(event);
+        }
     }
     if (selected >= 0) {
         LOG_INFO("dialog_existing_account_selected");
         _ZN17storeservicescore22ProtocolDialogResponse17setSelectedButtonERKNSt6__ndk110shared_ptrINS_14ProtocolButtonEEE(
             response.obj, static_cast<struct shared_ptr*>(buttons->begin) + selected);
+        event.type = AuthEventType::ExistingAccountSelected;
     } else {
         bool rejected;
         { std::lock_guard<std::mutex> lock(auth_state_mutex);
           rejected = observed.response_type.present && observed.response_type.value == 0; }
         LOG_WARN("%s", rejected ? "dialog_auth_failure_prompt" : "dialog_unsupported");
         callback_failure(rejected ? AuthOutcome::AuthenticationFailed : AuthOutcome::UnsupportedDialog);
+        event.type = rejected ? AuthEventType::AuthenticationFailurePrompt : AuthEventType::UnsupportedDialog;
     }
+    dispatch_auth_event(event);
     _ZN20androidstoreservices28AndroidPresentationInterface28handleProtocolDialogResponseERKlRKNSt6__ndk110shared_ptrIN17storeservicescore22ProtocolDialogResponseEEE(
         apInf.obj, &j, &response);
 }
@@ -156,11 +203,13 @@ void dialogHandler(long j, struct shared_ptr* dialog, struct shared_ptr* handler
 void credentialHandler(struct shared_ptr* request, struct shared_ptr* handler) {
     (void)handler;
     LOG_INFO("credentials_requested");
+    dispatch_auth_event(auth_event_snapshot(AuthEventType::CredentialsRequested));
     bool valid = amUsername && *amUsername && amPassword && *amPassword && request && request->obj;
     const bool needs_code = valid &&
         _ZNK17storeservicescore18CredentialsRequest28requiresHSA2VerificationCodeEv(request->obj);
     std::string password = valid ? amPassword : "";
     if (needs_code) {
+        dispatch_auth_event(auth_event_snapshot(AuthEventType::VerificationCodeRequested));
         std::string code;
         valid = read_code(code) && valid_verification_code(code);
         if (valid) password += code; // Always start from the ORIGINAL password.
@@ -201,21 +250,33 @@ void set_credentials(const char* user, const char* pass) {
 }
 
 bool login(struct shared_ptr ctx) {
-    std::lock_guard<std::mutex> login_lock(login_mutex);
+    // A callback can query state, replace itself, or attempt login again. Do not
+    // keep a serialization mutex locked across user code or start a second flow.
+    if (login_running.exchange(true)) {
+        LOG_WARN("auth_login_busy");
+        return false;
+    }
+    struct Finish {
+        bool released = false;
+        void release() {
+            if (released) return;
+            { std::lock_guard<std::mutex> lock(auth_state_mutex); auth_active = false; }
+            login_running.store(false);
+            released = true;
+        }
+        ~Finish() { release(); }
+    } finish;
     {
         std::lock_guard<std::mutex> lock(auth_state_mutex);
         observed = {}; observed_response = nullptr; callback_failed = false;
         outcome = AuthOutcome::MissingResponse; auth_active = true;
     }
-    struct Finish {
-        ~Finish() { std::lock_guard<std::mutex> lock(auth_state_mutex); auth_active = false; }
-    } finish;
     LOG_INFO("auth_started");
-    std::string storefront_path = std::string(g_base_dir) + "/STOREFRONT_ID";
-    std::string token_path = std::string(g_base_dir) + "/MUSIC_TOKEN";
-    remove(storefront_path.c_str()); remove(token_path.c_str());
-
     try {
+        dispatch_auth_event(auth_event_snapshot(AuthEventType::Started));
+        std::string storefront_path = std::string(g_base_dir) + "/STOREFRONT_ID";
+        std::string token_path = std::string(g_base_dir) + "/MUSIC_TOKEN";
+        remove(storefront_path.c_str()); remove(token_path.c_str());
         library_shared_ptr flow;
         _ZNSt6__ndk110shared_ptrIN17storeservicescore16AuthenticateFlowEE11make_sharedIJRNS0_INS1_14RequestContextEEEEEES3_DpOT_(&flow.value, &ctx);
         if (flow.value.obj) _ZN17storeservicescore16AuthenticateFlow3runEv(flow.value.obj);
@@ -229,15 +290,34 @@ bool login(struct shared_ptr ctx) {
             // Local failures have no URLResponse: leave protocol/HTTP unavailable.
             d = inspect_auth_response(response->obj, nullptr);
             log_diagnostics(d);
+            {
+                std::lock_guard<std::mutex> lock(auth_state_mutex);
+                observed = d;
+            }
+            AuthEvent event;
+            event.type = AuthEventType::Response;
+            event.diagnostics = d;
+            dispatch_auth_event(event);
         }
         std::lock_guard<std::mutex> lock(auth_state_mutex);
         if (!callback_failed) outcome = classify_auth_response(d);
         LOG_INFO("%s", auth_event(outcome));
-        return outcome == AuthOutcome::Success;
     } catch (...) {
         std::lock_guard<std::mutex> lock(auth_state_mutex);
         outcome = AuthOutcome::InternalError;
         LOG_ERROR("auth_internal_error");
-        return false;
     }
+    AuthEvent completed;
+    completed.type = AuthEventType::Completed;
+    completed.outcome_present = true;
+    {
+        std::lock_guard<std::mutex> lock(auth_state_mutex);
+        completed.diagnostics = observed;
+        completed.outcome = outcome;
+    }
+    // Native flow owners have already been destroyed. Release the attempt gate
+    // before the final notification, allowing a subsequent attempt from it.
+    finish.release();
+    dispatch_auth_event(completed);
+    return completed.outcome == AuthOutcome::Success;
 }

@@ -13,6 +13,11 @@ token data; long-password 2FA input; actual HTTP status/body-size options; and
 certificate/hostname verification against local fixtures. The HTTP/TLS fixtures
 use loopback sockets only and need no account or external service.
 
+They first verify the pinned runtime hashes with `tests/verify_library_hashes.sh`.
+Each C++ fixture has a 120-second timeout, including reentrant authentication
+event tests (registration, state queries, nested attempts, handler exceptions,
+presence flags, dialog events, code-provider ordering and final outcomes).
+
 In a sandbox that prevents LeakSanitizer from inspecting processes, run
 `ASAN_OPTIONS=detect_leaks=0 bash tests/run_checks.sh`. AddressSanitizer,
 UndefinedBehaviorSanitizer and the explicit owner-count assertions still run.
@@ -68,3 +73,18 @@ run `ANDROID_NDK_PATH=/path/to/ndk bash tests/build_auth_guest.sh` to build
 `/tmp/wrapper-auth-library-abi` (an optional first argument changes that path).
 Run it in a guest with a writable `/data` and no account. It constructs local dialogs/messages
 and protocol responses; it never calls the authentication network request.
+
+To run both Android ABI fixtures through the same path as CI, build them as
+above and run:
+
+```bash
+python3 tests/run_guest_checks.py --kernel /path/to/vmlinuz \
+  --auth-binary /tmp/wrapper-auth-library-abi --ownership-binary /tmp/library-abi
+```
+
+The runner needs static BusyBox (`--busybox` overrides `/bin/busybox`), cpio and
+QEMU (`--qemu` / `--firmware-dir` are optional overrides). It creates a fresh
+initramfs, excludes local account data, disables networking and persistent
+disks, and fails on a fixture error, timeout or private sentinel in debug logs.
+`offline-checks.yml` runs this plus host regressions on work/lite pushes and PRs;
+guest logs are uploaded even on failure.

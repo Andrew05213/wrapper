@@ -5,6 +5,13 @@
 #include <cassert>
 #include <cstddef>
 
+static std::vector<AuthEvent> auth_events;
+static void record_auth_event(const AuthEvent& event, void*) {
+    auth_events.push_back(event);
+    (void)last_auth_outcome();
+    set_auth_event_handler(record_auth_event); // Must also be safe on native callback stacks.
+}
+
 extern "C" {
 void _ZN13mediaplatform11HTTPMessage18responseWithStatusEi(void*, void*, int);
 void _ZN17storeservicescore11URLResponseC1ENSt6__ndk110shared_ptrIN13mediaplatform11HTTPMessageEEENS2_INS3_12HTTPResponseEEE(void*, struct shared_ptr*, struct shared_ptr*);
@@ -38,6 +45,7 @@ int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
     Logger::get().configure(LogLevel::Debug, "", 0);
     puts("AUTH_ABI_START");
+    set_auth_event_handler(record_auth_event);
     install_hooks();
     set_base_dir("/data/auth-offline-fixture");
     init("Music/5.0.2/Android/10/Pixel 8/7663314/en-US/en-US/e82320052964d21a");
@@ -48,6 +56,10 @@ int main() {
     library_shared_ptr flow;
     _ZNSt6__ndk110shared_ptrIN17storeservicescore16AuthenticateFlowEE11make_sharedIJRNS0_INS1_14RequestContextEEEEEES3_DpOT_(&flow.value, &g_reqCtx);
     assert(_ZN17storeservicescore16AuthenticateFlow20_resolveEmptyAccountEv(flow.value.obj) == 2);
+    assert(auth_events.size() == 2);
+    assert(auth_events[0].type == AuthEventType::AccountChoice);
+    assert(auth_events[1].type == AuthEventType::ExistingAccountSelected);
+    assert(auth_events[1].dialog_kind.present && auth_events[1].dialog_kind.value == 2);
 
     puts("AUTH_ABI_DIALOG");
     std::string agent, identifier;
@@ -112,6 +124,9 @@ int main() {
         _ZN17storeservicescore11URLResponseC1ENSt6__ndk110shared_ptrIN13mediaplatform11HTTPMessageEEENS2_INS3_12HTTPResponseEEE(url_storage, &message.value, &http.value);
         struct shared_ptr url = {url_storage, nullptr};
         _ZN17storeservicescore20AuthenticateResponseC1ERKNSt6__ndk110shared_ptrINS_11URLResponseEEE(response_storage, &url);
+        assert(auth_events.back().type == AuthEventType::Response);
+        assert(auth_events.back().diagnostics.protocol_error.present);
+        assert(auth_events.back().diagnostics.protocol_error.value == std::stoll(code));
         const auto d = inspect_auth_response(response_storage, &url);
         assert(d.store_error.present && d.store_error.value == 10);
         assert(d.failure_type.present && d.failure_type.value == -5000);
@@ -128,6 +143,7 @@ int main() {
             struct shared_ptr response = {response_storage, nullptr};
             assert(!_ZN17storeservicescore16AuthenticateFlow34_shouldRetryAfterIncorrectPasswordERKNSt6__ndk110shared_ptrINS_20AuthenticateResponseEEE(flow.value.obj, &response));
             assert(last_auth_outcome() == AuthOutcome::AuthenticationFailed);
+            assert(auth_events.back().type == AuthEventType::AuthenticationFailurePrompt);
             { std::lock_guard<std::mutex> lock(auth_state_mutex); auth_active = false; }
         }
         // These destructors are inlined in the library; release the verified

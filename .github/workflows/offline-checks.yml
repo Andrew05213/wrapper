@@ -1,0 +1,66 @@
+name: offline-checks
+
+on:
+  push:
+    branches: [work, lite]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify pinned Android runtime
+        run: bash tests/verify_library_hashes.sh
+
+      - name: Install build and offline test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake git unzip python3 openssl libcurl4-openssl-dev busybox-static cpio qemu-system-x86 linux-image-generic
+
+      - name: Download and verify Android NDK r23b
+        run: |
+          curl --fail --location --retry 3 -o android-ndk-r23b-linux.zip https://dl.google.com/android/repository/android-ndk-r23b-linux.zip
+          echo 'c6e97f9c8cfe5b7be0a9e6c15af8e7a179475b7ded23e2d1c1fa0945d6fb4382  android-ndk-r23b-linux.zip' | sha256sum --check --strict
+          unzip -q android-ndk-r23b-linux.zip
+
+      - name: Build Android lite
+        run: |
+          /usr/bin/cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_HOST_LAUNCHERS=OFF
+          /usr/bin/cmake --build build --target lite -j2
+
+      - name: Run host ASan/UBSan and HTTP/TLS/launcher regressions
+        run: bash tests/run_checks.sh
+
+      - name: Build native ABI fixtures
+        run: |
+          export ANDROID_NDK_PATH="$GITHUB_WORKSPACE/android-ndk-r23b"
+          bash tests/build_auth_guest.sh /tmp/auth-library-abi
+          "$ANDROID_NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android22-clang++" \
+            -std=c++11 -O1 -ffunction-sections -fdata-sections \
+            -I. -Ibuild/_deps/cjson-src tests/library_abi.cpp -Wl,--gc-sections \
+            -Lrootfs/system/lib64 -landroidappmusic -lstoreservicescore \
+            -lmediaplatform -lc++_shared -llog -lcurl -ldl -o /tmp/library-abi
+
+      - name: Run both ABI fixtures in an isolated QEMU guest
+        run: |
+          kernel="$(find /boot -maxdepth 1 -name 'vmlinuz-*' | sort -V | tail -1)"
+          test -n "$kernel"
+          sudo cp "$kernel" /tmp/abi-test-kernel
+          sudo chmod 644 /tmp/abi-test-kernel
+          python3 tests/run_guest_checks.py --kernel /tmp/abi-test-kernel \
+            --auth-binary /tmp/auth-library-abi --ownership-binary /tmp/library-abi
+
+      - name: Retain guest diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: offline-guest-log
+          path: guest-checks.log
+          if-no-files-found: ignore

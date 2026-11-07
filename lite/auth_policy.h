@@ -16,9 +16,9 @@ struct AuthDiagnostics {
 };
 
 enum class AuthOutcome {
-    Success, AuthenticationFailed, VerificationRequired, Cancelled,
-    UnsupportedDialog, InvalidCredentials, InvalidVerificationCode,
-    TransportFailed, MissingResponse, UnexpectedResponse, InternalError
+    Success = 0, AuthenticationFailed = 1, VerificationRequired = 2, Cancelled = 3,
+    UnsupportedDialog = 4, InvalidCredentials = 5, InvalidVerificationCode = 6,
+    TransportFailed = 7, MissingResponse = 8, UnexpectedResponse = 9, InternalError = 10
 };
 
 inline const char* auth_event(AuthOutcome outcome) {

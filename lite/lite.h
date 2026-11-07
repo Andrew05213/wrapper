@@ -7,6 +7,7 @@
 #include <vector>
 #include <mutex>
 #include "auth_policy.h"
+#include "auth_events.h"
 
 /* ---- JSON response helpers ---- */
 struct LiteResponse {

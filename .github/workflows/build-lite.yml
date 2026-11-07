@@ -12,6 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Verify pinned Android runtime before packaging
+        run: bash tests/verify_library_hashes.sh
+
       - name: Install host build tools
         run: |
           sudo apt-get update

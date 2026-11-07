@@ -2,6 +2,9 @@
 #include <cassert>
 #include <map>
 #include <fstream>
+#include <type_traits>
+
+static_assert(std::is_trivially_copyable<AuthEvent>::value, "events must remain value-only snapshots");
 
 char* amUsername = nullptr;
 char* amPassword = nullptr;
@@ -16,6 +19,7 @@ static bool has_protocol_error = true;
 static int native_type = 0, native_status = 6, store_error = 10;
 static long failure_type = -5000;
 static bool has_error = true, has_response = true, show_unsupported = false, throw_exception = false;
+static bool observe_response = true;
 static char http[136] = {};
 static struct shared_ptr native_response = {&native_type, nullptr};
 static struct shared_ptr url_response = {http, nullptr};
@@ -57,7 +61,7 @@ extern "C" void _ZNSt6__ndk110shared_ptrIN17storeservicescore16AuthenticateFlowE
 extern "C" struct shared_ptr* _ZNK17storeservicescore16AuthenticateFlow8responseEv(void*) { return has_response ? &native_response : nullptr; }
 extern "C" void _ZN17storeservicescore16AuthenticateFlow3runEv(void*) {
     if (throw_exception) throw std::runtime_error("SECRET-native-exception");
-    if (has_response) auth_response_observed(native_response.obj, &url_response);
+    if (has_response && observe_response) auth_response_observed(native_response.obj, &url_response);
     if (show_unsupported) { struct shared_ptr dialog = {http, nullptr}; dialogHandler(1, &dialog, nullptr); }
 }
 extern "C" void _ZN17storeservicescore22ProtocolDialogResponseC1Ev(void*) { selection = -1; default_actions = true; }
@@ -80,9 +84,51 @@ extern "C" struct shared_ptr* _ZNK17storeservicescore14ProtocolButton6actionEv(v
 extern "C" void _ZN17storeservicescore22ProtocolDialogResponse17setSelectedButtonERKNSt6__ndk110shared_ptrINS_14ProtocolButtonEEE(void*, struct shared_ptr* button) { selection = static_cast<int>(button - button_array); }
 extern "C" void _ZN20androidstoreservices28AndroidPresentationInterface28handleProtocolDialogResponseERKlRKNSt6__ndk110shared_ptrIN17storeservicescore22ProtocolDialogResponseEEE(void*, long*, struct shared_ptr*) { assert(!default_actions); }
 
+struct EventRecorder {
+    std::vector<AuthEvent> events;
+    bool throw_on_response = false;
+    bool login_after_completion = false;
+};
+static void record_event(const AuthEvent& event, void* context) {
+    auto& recorder = *static_cast<EventRecorder*>(context);
+    recorder.events.push_back(event); // Consumers can retain a copy safely.
+    const auto current = last_auth_outcome(); // Reentrant state access.
+    set_auth_event_handler(record_event, context); // Reentrant registration.
+    assert(event.outcome_present == (event.type == AuthEventType::Completed));
+    if (event.type == AuthEventType::Started) {
+        const size_t count = recorder.events.size();
+        assert(!login({nullptr, nullptr})); // In-progress reentry must return, not deadlock.
+        assert(recorder.events.size() == count); // No recursive busy-event loop.
+    }
+    if (event.outcome_present) assert(event.outcome == current);
+    if (event.type == AuthEventType::Response && recorder.throw_on_response) {
+        recorder.throw_on_response = false;
+        throw std::runtime_error("SECRET-event-handler-exception");
+    }
+    if (event.type == AuthEventType::Completed && recorder.login_after_completion) {
+        recorder.login_after_completion = false;
+        native_type = 6; has_error = false; has_protocol_error = false;
+        assert(login({nullptr, nullptr})); // Final dispatch releases the attempt gate.
+    }
+}
+static EventRecorder recorder;
 static void expect(AuthOutcome expected) {
+    recorder.events.clear();
     assert(login({nullptr, nullptr}) == (expected == AuthOutcome::Success));
     assert(last_auth_outcome() == expected);
+    assert(recorder.events.front().type == AuthEventType::Started);
+    const auto& final = recorder.events.back();
+    assert(final.type == AuthEventType::Completed && final.outcome == expected);
+    assert(final.outcome_present);
+    if (has_response && !throw_exception) {
+        assert(final.diagnostics.response_type.present && final.diagnostics.response_type.value == native_type);
+        assert(final.diagnostics.http_status.present == observe_response);
+        assert(final.diagnostics.store_error.present == has_error);
+        if (has_error) {
+            assert(final.diagnostics.store_error.value == store_error);
+            assert(final.diagnostics.failure_type.present && final.diagnostics.failure_type.value == failure_type);
+        }
+    } else assert(!final.diagnostics.response_type.present);
 }
 int main() {
     char directory[] = "/tmp/wrapper-auth-XXXXXX";
@@ -90,10 +136,15 @@ int main() {
     snprintf(g_base_dir, sizeof(g_base_dir), "%s", directory);
     const std::string log = std::string(directory) + "/events.log";
     Logger::get().configure(LogLevel::Debug, log, 0);
+    set_auth_event_handler(record_event, &recorder);
     int status = 200; memcpy(http + 128, &status, sizeof(status));
     // Same failureType, different protocol errorCode and responseType.
     protocol_error.text = "-5000"; expect(AuthOutcome::AuthenticationFailed);
+    assert(recorder.events[1].type == AuthEventType::Response);
+    assert(recorder.events.back().diagnostics.protocol_error.present);
+    assert(recorder.events.back().diagnostics.protocol_error.value == -5000);
     native_type = 1; protocol_error.text = "-22947"; expect(AuthOutcome::VerificationRequired);
+    assert(recorder.events.back().diagnostics.protocol_error.value == -22947);
     native_type = 0; expect(AuthOutcome::AuthenticationFailed); // never infer challenge from -5000
     native_type = 1; has_protocol_error = false; expect(AuthOutcome::AuthenticationFailed);
     has_protocol_error = true; protocol_error.text = "SECRET-server-message";
@@ -105,6 +156,9 @@ int main() {
     native_type = 6; has_error = false; has_protocol_error = false;
     expect(AuthOutcome::TransportFailed); // native success cannot hide HTTP rejection
     status = 200; memcpy(http + 128, &status, sizeof(status)); expect(AuthOutcome::Success);
+    observe_response = false; expect(AuthOutcome::Success);
+    assert(!recorder.events.back().diagnostics.protocol_error.present);
+    observe_response = true;
     native_status = 2; expect(AuthOutcome::UnexpectedResponse); native_status = 6;
     has_response = false; expect(AuthOutcome::MissingResponse);
     has_response = true; native_type = 4; expect(AuthOutcome::UnexpectedResponse);
@@ -113,19 +167,40 @@ int main() {
     set_auth_dialog_origin(AuthDialogOrigin::AccountChoice);
     dialog_failure = 0x5a5a5a5a5a5a5a5aLL; // stale bytes from the native default constructor
     kind = 2; dialogHandler(1, &dialog, nullptr); assert(selection == 0);
+    assert(recorder.events[recorder.events.size() - 2].type == AuthEventType::AccountChoice);
+    assert(recorder.events.back().type == AuthEventType::ExistingAccountSelected);
+    assert(recorder.events.back().dialog_kind.present && recorder.events.back().dialog_kind.value == 2);
+    assert(recorder.events.back().dialog_failure_type.present && recorder.events.back().dialog_failure_type.value == 0);
     assert(dialog_failure == 0);
     // Chinese titles cannot change selection; server text must never enter logs.
     kind = 0; dialogHandler(1, &dialog, nullptr); assert(selection == -1);
     set_auth_dialog_origin(AuthDialogOrigin::Protocol);
     kind = 2; dialog_failure = -5000; dialogHandler(1, &dialog, nullptr); assert(selection == -1);
+    assert(recorder.events.back().type == AuthEventType::UnsupportedDialog);
+    assert(recorder.events.back().dialog_failure_type.value == -5000);
     dialog_failure = 0; fields.begin = http; fields.end = http + 1;
     dialogHandler(1, &dialog, nullptr); assert(selection == -1);
     fields = {}; kind = 0; show_unsupported = true;
     native_type = 6; expect(AuthOutcome::UnsupportedDialog); // callback error overrides flow success
     native_type = 0; expect(AuthOutcome::AuthenticationFailed); // Cancel/Retry is downstream failure
+    assert(recorder.events[recorder.events.size() - 2].type == AuthEventType::AuthenticationFailurePrompt);
+    assert(recorder.events[recorder.events.size() - 2].diagnostics.response_type.value == 0);
     assert(selection == -1);
     show_unsupported = false; throw_exception = true;
     expect(AuthOutcome::InternalError); throw_exception = false;
+    native_type = 6; recorder.throw_on_response = true;
+    expect(AuthOutcome::Success); // Exceptions in observers cannot alter authentication.
+    native_type = 0; recorder.login_after_completion = true;
+    recorder.events.clear();
+    assert(!login({nullptr, nullptr})); // Outer return is not overwritten by the nested success.
+    assert(recorder.events[2].type == AuthEventType::Completed);
+    assert(recorder.events[2].outcome == AuthOutcome::AuthenticationFailed);
+    assert(recorder.events.back().outcome == AuthOutcome::Success);
+    assert(last_auth_outcome() == AuthOutcome::Success);
+    const size_t count = recorder.events.size();
+    set_auth_event_handler(nullptr);
+    assert(login({nullptr, nullptr}));
+    assert(recorder.events.size() == count);
     std::vector<AuthDialogButton> semantic = {{"open-url"}, {"authenticate"}};
     assert(existing_account_button(2, 0, false, semantic) == 1);
     semantic.push_back({"authenticate"});
