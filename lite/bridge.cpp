@@ -26,11 +26,7 @@ char* device_infos[9];
 char g_base_dir[256] = "data";
 int offlineFlag = 0;
 uint8_t leaseMgr[256];
-#ifdef LITE_RELEASE
 bool g_ssl_verify_disabled = false;
-#else
-bool g_ssl_verify_disabled = true;
-#endif
 bool g_code_from_file = false;
 
 extern const char* const fairplayCert;
@@ -83,13 +79,7 @@ void init(const char* device_info_str) {
 
 struct shared_ptr init_ctx() {
     LOG_INFO("initializing ctx...");
-    LOG_DEBUG("device_infos: 0='%s' 1='%s' 2='%s' 3='%s' 4='%s' 5='%s' 6='%s' 7='%s' 8='%s'",
-              device_infos[0]?device_infos[0]:"NULL", device_infos[1]?device_infos[1]:"NULL",
-              device_infos[2]?device_infos[2]:"NULL", device_infos[3]?device_infos[3]:"NULL",
-              device_infos[4]?device_infos[4]:"NULL", device_infos[5]?device_infos[5]:"NULL",
-              device_infos[6]?device_infos[6]:"NULL", device_infos[7]?device_infos[7]:"NULL",
-              device_infos[8]?device_infos[8]:"NULL");
-    LOG_DEBUG("base_dir='%s'", g_base_dir);
+    LOG_DEBUG("request_context_initializing");
     std::string mplDbPath = std::string(g_base_dir) + "/mpl_db";
     union std_string strBuf = new_std_string(mplDbPath.c_str());
 
@@ -142,22 +132,17 @@ static int (*orig_log_print)(int prio, const char *tag, const char *fmt, ...);
 static int (*orig_log_write)(int prio, const char *tag, const char *text);
 static int (*orig_curl_easy_setopt)(void *curl, int32_t option, ...);
 
-static uint8_t allDebug() { return 1; }
+static uint8_t allDebug() { return 0; }
 
 int log_print_hook(int prio, const char *tag, const char *fmt, ...) {
-    (void)prio;
-    char log_buffer[1024];
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(log_buffer, sizeof(log_buffer), fmt, args);
-    va_end(args);
-    LOG_DEBUG("[%s] %s", tag, log_buffer);
+    // Library messages can contain credentials, headers and whole responses.
+    // Never format or forward them, even at wrapper's debug log level.
+    (void)prio; (void)tag; (void)fmt;
     return 0;
 }
 
 int log_write_hook(int prio, const char *tag, const char *text) {
-    (void)prio;
-    LOG_DEBUG("[%s] %s", tag, text);
+    (void)prio; (void)tag; (void)text;
     return 0;
 }
 
@@ -168,10 +153,31 @@ int curl_easy_setopt_hook(void *curl, int32_t option, ...) {
     va_end(args);
     if (g_ssl_verify_disabled && (option == 64 || option == 81 || option == 10230)) {
         LOG_DEBUG("hooked curl_easy_setopt %d (SSL verify disabled)", option);
-        orig_curl_easy_setopt(curl, 43, 1L);
         return orig_curl_easy_setopt(curl, option, 0L);
     }
     return orig_curl_easy_setopt(curl, option, param);
+}
+
+static void (*original_auth_response)(void*, struct shared_ptr*);
+static int (*original_account_choice)(void*);
+static bool (*original_failure_prompt)(void*, struct shared_ptr*);
+struct AuthDialogScope {
+    AuthDialogOrigin previous;
+    explicit AuthDialogScope(AuthDialogOrigin origin) : previous(set_auth_dialog_origin(origin)) {}
+    ~AuthDialogScope() { set_auth_dialog_origin(previous); }
+};
+static int account_choice_hook(void* flow) {
+    AuthDialogScope scope(AuthDialogOrigin::AccountChoice);
+    return original_account_choice(flow);
+}
+static bool failure_prompt_hook(void* flow, struct shared_ptr* response) {
+    AuthDialogScope scope(AuthDialogOrigin::FailurePrompt);
+    return original_failure_prompt(flow, response);
+}
+static void auth_response_hook(void* response, struct shared_ptr* url_response) {
+    original_auth_response(response, url_response);
+    // Observation only: never alter URL, method, body, headers or cookies.
+    auth_response_observed(response, url_response);
 }
 
 void install_hooks() {
@@ -182,6 +188,15 @@ void install_hooks() {
               (void*)&allDebug, (void**)&orig_debug_log_enabled);
     DobbyHook((void*)&__android_log_print, (void*)&log_print_hook, (void**)&orig_log_print);
     DobbyHook((void*)&__android_log_write, (void*)&log_write_hook, (void**)&orig_log_write);
+    if (DobbyHook((void*)&_ZN17storeservicescore16AuthenticateFlow20_resolveEmptyAccountEv,
+                  (void*)&account_choice_hook, (void**)&original_account_choice) != 0)
+        LOG_WARN("auth_dialog_classifier_unavailable");
+    if (DobbyHook((void*)&_ZN17storeservicescore16AuthenticateFlow34_shouldRetryAfterIncorrectPasswordERKNSt6__ndk110shared_ptrINS_20AuthenticateResponseEEE,
+                  (void*)&failure_prompt_hook, (void**)&original_failure_prompt) != 0)
+        LOG_WARN("auth_failure_prompt_classifier_unavailable");
+    if (DobbyHook((void*)&_ZN17storeservicescore20AuthenticateResponseC1ERKNSt6__ndk110shared_ptrINS_11URLResponseEEE,
+                  (void*)&auth_response_hook, (void**)&original_auth_response) != 0)
+        LOG_WARN("auth_response_observer_unavailable");
     if (g_ssl_verify_disabled) {
         DobbyHook((void*)&curl_easy_setopt, (void*)&curl_easy_setopt_hook, (void**)&orig_curl_easy_setopt);
     }

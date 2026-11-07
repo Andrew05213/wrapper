@@ -1,4 +1,4 @@
-# Memory regression checks
+# Regression checks
 
 After configuring the normal CMake build, run all host checks:
 
@@ -57,3 +57,14 @@ destruction and shared-pointer vector cleanup. It does not
 measure authenticated batch-download memory or throughput. Rebuild the guest
 initramfs with the updated lite binary to apply the service fixes; rebuilding
 only the host launcher applies the TCG cache limit.
+
+Authentication checks also cover separate Store/protocol/HTTP fields, safe
+dialog selection, exact stdin/JSON/argument preservation, repeated code
+challenges, failure categories and token-cache persistence failures. See
+[the audit and AMDL handoff](../docs/authentication.md).
+
+`auth_library_abi.cpp` is an additional NDK guest fixture. After building lite,
+run `ANDROID_NDK_PATH=/path/to/ndk bash tests/build_auth_guest.sh` to build
+`/tmp/wrapper-auth-library-abi` (an optional first argument changes that path).
+Run it in a guest with a writable `/data` and no account. It constructs local dialogs/messages
+and protocol responses; it never calls the authentication network request.

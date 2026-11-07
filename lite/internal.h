@@ -3,6 +3,8 @@
 #include "import.h"
 #include "logger.h"
 #include <mutex>
+#include <string>
+#include "auth_policy.h"
 
 extern void* FHinstance;
 extern struct shared_ptr g_reqCtx;
@@ -25,6 +27,12 @@ void init(const char* device_info_str);
 struct shared_ptr init_ctx();
 void install_hooks();
 bool login(struct shared_ptr ctx);
+AuthOutcome last_auth_outcome();
+void auth_response_observed(void* response, struct shared_ptr* url_response);
+enum class AuthDialogOrigin { Protocol, AccountChoice, FailurePrompt };
+AuthDialogOrigin set_auth_dialog_origin(AuthDialogOrigin origin);
+// Downstream stdin transports supply fresh codes without modifying passwords.
+void set_verification_code_provider(bool (*provider)(std::string&));
 void setup_services();
 int offline_available_impl();
 

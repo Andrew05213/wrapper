@@ -120,7 +120,7 @@ All responses use:
 | `--base-dir` | `data` | data directory |
 | `--device-info` | auto | override the entire device-info string (see [Device info](#device-info)) |
 | `--proxy` | — | proxy URL |
-| `--debug` | off | debug logging; disables SSL verify in Release |
+| `--debug` | off | debug logging; TLS verification remains enabled |
 | `--log-level` | `info` | `debug`, `info`, `warn`, `error` |
 | `--log-file` | — | log file path |
 | `--token-refresh-interval` | `1800` | background refresh interval in seconds |
@@ -196,12 +196,16 @@ the TCG cache setting.
 
 ## Build notes
 
-- Release: SSL verification is enabled by default. Pass `--debug` to disable it temporarily.
-- Debug: SSL verification is disabled by default.
+- Release and Debug builds verify TLS certificates and hostnames. `--debug`
+  only changes logging verbosity.
 - The QEMU build includes a CA bundle at `/usr/local/android/cert.pem`. Set
   `SSL_CERT_FILE` to supply a different bundle when building or running natively.
 
 ## AMDL integration
+
+See [authentication diagnostics and AMDL handoff](docs/authentication.md) for
+separate Store/protocol/HTTP error fields, safe dialog handling, stdin input,
+the verification-code provider API, offline checks and current limitations.
 
 The Android binary now provides `native_decrypt(stream, adamId, uri, input,
 output)`, `native_decrypt_close(stream)` and `native_decrypt_close_all()` in

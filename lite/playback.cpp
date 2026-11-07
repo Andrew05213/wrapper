@@ -164,7 +164,7 @@ static void* getKdContext(const std::string& adam, const std::string& uri, struc
                           const struct shared_ptr* known, struct shared_ptr* fetched) {
     uint8_t isPreshare = (adam == "0");
     if (isPreshare && preshareCtx) return preshareCtx;
-    LOG_INFO("adamId: %s, uri: %s", adam.c_str(), uri.c_str());
+    LOG_DEBUG("playback_context_requested");
 
     union std_string defaultId = new_std_string(adam.c_str());
     union std_string keyUri = new_std_string(uri.c_str());

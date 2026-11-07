@@ -119,6 +119,18 @@ _ZNSt6__ndk110shared_ptrIN17storeservicescore16AuthenticateFlowEE11make_sharedIJ
 IMPORT_EXTERN void _ZN17storeservicescore16AuthenticateFlow3runEv(void *);
 IMPORT_EXTERN struct shared_ptr *_ZNK17storeservicescore16AuthenticateFlow8responseEv(void *);
 IMPORT_EXTERN int _ZNK17storeservicescore20AuthenticateResponse12responseTypeEv(void *);
+IMPORT_EXTERN const int *_ZNK17storeservicescore20AuthenticateResponse6statusEv(void *);
+IMPORT_EXTERN void _ZNK17storeservicescore14RequestContext9userAgentEv(void *, void *);
+IMPORT_EXTERN const long *_ZNK17storeservicescore19StoreErrorCondition17externalErrorCodeEv(void *);
+IMPORT_EXTERN void _ZN17storeservicescore20AuthenticateResponseC1ERKNSt6__ndk110shared_ptrINS_11URLResponseEEE(void *, struct shared_ptr *);
+IMPORT_EXTERN int _ZNK17storeservicescore14ProtocolDialog10dialogKindEv(void *);
+IMPORT_EXTERN long long _ZNK17storeservicescore14ProtocolDialog11failureTypeEv(void *);
+IMPORT_EXTERN void _ZN17storeservicescore14ProtocolDialog14setFailureTypeEx(void *, long long);
+IMPORT_EXTERN int _ZN17storeservicescore16AuthenticateFlow20_resolveEmptyAccountEv(void *);
+IMPORT_EXTERN bool _ZN17storeservicescore16AuthenticateFlow34_shouldRetryAfterIncorrectPasswordERKNSt6__ndk110shared_ptrINS_20AuthenticateResponseEEE(void *, struct shared_ptr *);
+IMPORT_EXTERN struct std_vector *_ZNK17storeservicescore14ProtocolDialog10textFieldsEv(void *);
+IMPORT_EXTERN struct shared_ptr *_ZNK17storeservicescore14ProtocolButton6actionEv(void *);
+IMPORT_EXTERN void _ZN17storeservicescore22ProtocolDialogResponse31setPerformsDefaultButtonActionsEb(void *, bool);
 
 // storeservicescore::PlaybackLeaseSession::PlaybackLeaseSession(std::__ndk1::shared_ptr<storeservicescore::RequestContext>
 // const&)

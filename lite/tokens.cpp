@@ -114,7 +114,7 @@ static char* get_dev_token_impl() {
     return response_token(urlRequest, "token");
 }
 
-static char* get_music_user_token_impl(const char* authToken) {
+static char* get_music_user_token_impl(const char* authToken, const std::string& storefront) {
     std::unique_ptr<char, decltype(&free)> guid(get_guid(), &free);
     if (!guid) return nullptr;
 
@@ -132,11 +132,12 @@ static char* get_music_user_token_impl(const char* authToken) {
     union std_string bundleIdValue = new_std_string("com.apple.android.music");
     _ZN13mediaplatform11HTTPMessage9setHeaderERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_(httpMessage.obj, &bundleIdHeader, &bundleIdValue);
     union std_string bundleVerHeader = new_std_string("X-Apple-Requesting-Bundle-Version");
-    union std_string bundleVerValue = new_std_string("Music/4.9 Android/10 model/Samsung S9 build/7663313 (dt:66)");
-    _ZN13mediaplatform11HTTPMessage9setHeaderERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_(httpMessage.obj, &bundleVerHeader, &bundleVerValue);
-    union std_string guidHeader = new_std_string("X-Apple-Store-Front");
-    union std_string guidValue = new_std_string(g_base_dir);
-    _ZN13mediaplatform11HTTPMessage9setHeaderERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_(httpMessage.obj, &guidHeader, &guidValue);
+    library_string bundle_version;
+    _ZNK17storeservicescore14RequestContext9userAgentEv(&bundle_version.value, g_reqCtx.obj);
+    _ZN13mediaplatform11HTTPMessage9setHeaderERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_(httpMessage.obj, &bundleVerHeader, &bundle_version.value);
+    union std_string storefront_header = new_std_string("X-Apple-Store-Front");
+    union std_string storefront_value = new_std_string(storefront.c_str());
+    _ZN13mediaplatform11HTTPMessage9setHeaderERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_(httpMessage.obj, &storefront_header, &storefront_value);
 
     cJSON* bodyJson = cJSON_CreateObject();
     cJSON_AddStringToObject(bodyJson, "guid", guid.get());
@@ -191,13 +192,13 @@ static bool write_token_file(const std::string& path, const std::string& content
     std::string tmp = path + ".tmp";
     FILE* fp = fopen(tmp.c_str(), "w");
     if (!fp) {
-        LOG_WARN("failed to write %s", path.c_str());
+        LOG_WARN("token_file_write_failed");
         return false;
     }
     fwrite(content.data(), 1, content.size(), fp);
     fclose(fp);
     if (rename(tmp.c_str(), path.c_str()) != 0) {
-        LOG_WARN("failed to rename %s -> %s", tmp.c_str(), path.c_str());
+        LOG_WARN("token_file_replace_failed");
         remove(tmp.c_str());
         return false;
     }
@@ -222,7 +223,7 @@ bool refresh_tokens(std::string& out_storefront, std::string& out_dev_token, std
     }
     write_token_file(std::string(g_base_dir) + "/DEV_TOKEN", std::string(devToken));
 
-    char* musicToken = get_music_user_token_impl(devToken);
+    char* musicToken = get_music_user_token_impl(devToken, sf);
     std::string music;
     if (musicToken) {
         music = musicToken;
@@ -230,7 +231,7 @@ bool refresh_tokens(std::string& out_storefront, std::string& out_dev_token, std
     } else {
         music = read_token_file(std::string(g_base_dir) + "/MUSIC_TOKEN");
         if (!music.empty()) {
-            LOG_WARN("using cached MUSIC_TOKEN (%.14s...)", music.c_str());
+            LOG_WARN("music_token_cache_used");
         }
     }
 

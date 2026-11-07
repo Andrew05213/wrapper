@@ -20,7 +20,7 @@ static void* getCurl() {
     if (!curl_lib) {
         curl_lib = dlopen("libcurl.so", RTLD_LAZY | RTLD_LOCAL);
         if (!curl_lib) {
-            LOG_WARN("failed to dlopen libcurl.so: %s", dlerror());
+            LOG_WARN("curl_library_unavailable");
         }
     }
     return curl_lib;
@@ -149,11 +149,10 @@ void TokenCache::load() {
     loaded = !dev_token.empty() || !music_token.empty();
     cJSON_Delete(root);
     if (loaded)
-        LOG_INFO("token cache loaded (dev=%.16s... music=%.16s...)",
-                dev_token.c_str(), music_token.c_str());
+        LOG_INFO("token_cache_loaded");
 }
 
-void TokenCache::save() {
+bool TokenCache::save() {
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "dev_token", dev_token.c_str());
     cJSON_AddStringToObject(root, "music_token", music_token.c_str());
@@ -162,7 +161,7 @@ void TokenCache::save() {
     cJSON_Delete(root);
     if (!printed) {
         LOG_WARN("failed to serialize token cache");
-        return;
+        return false;
     }
 
     std::string path = (base_dir.empty() ? "data" : base_dir) + "/token_cache.json";
@@ -171,18 +170,25 @@ void TokenCache::save() {
     if (!fp) {
         LOG_WARN("failed to write token cache");
         cJSON_free(printed);
-        return;
+        return false;
     }
-    fwrite(printed, 1, strlen(printed), fp);
-    fclose(fp);
+    const size_t length = strlen(printed);
+    const bool written = fwrite(printed, 1, length, fp) == length;
+    const bool closed = fclose(fp) == 0;
     cJSON_free(printed);
+    if (!written || !closed) {
+        LOG_WARN("token_cache_write_failed");
+        remove(tmp.c_str());
+        return false;
+    }
 
     if (rename(tmp.c_str(), path.c_str()) != 0) {
         LOG_WARN("failed to replace token cache");
         remove(tmp.c_str());
-        return;
+        return false;
     }
     LOG_INFO("token cache saved");
+    return true;
 }
 
 TokenCache g_tokens;
@@ -201,13 +207,13 @@ std::string AppleApi::getDevToken() {
     curl.setOptStr(CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
     curl.setOptStr(CURLOPT_ACCEPT_ENCODING, "");
     if (!curl.perform()) { LOG_WARN("devtoken: fetch music.apple.com failed"); return ""; }
-    LOG_DEBUG("devtoken: html size=%zu", html.size());
+    LOG_DEBUG("dev_token_html_received");
 
     std::regex jsRe("/assets/index~[^/]+\\.js");
     std::smatch match;
     if (!std::regex_search(html, match, jsRe)) { LOG_WARN("devtoken: no js asset in html"); return ""; }
     std::string jsPath = match.str();
-    LOG_DEBUG("devtoken: js path=%s", jsPath.c_str());
+    LOG_DEBUG("dev_token_script_selected");
 
     std::string js;
     CurlEasy jsCurl;
@@ -219,12 +225,12 @@ std::string AppleApi::getDevToken() {
     jsCurl.setOptInt(CURLOPT_TIMEOUT_MS, 15000);
     jsCurl.setOptStr(CURLOPT_ACCEPT_ENCODING, "");
     if (!jsCurl.perform()) { LOG_WARN("devtoken: fetch js failed"); return ""; }
-    LOG_DEBUG("devtoken: js size=%zu", js.size());
+    LOG_DEBUG("dev_token_script_received");
 
     std::regex tokenRe("eyJ[A-Za-z0-9-_=]+\\.[A-Za-z0-9-_=]+\\.[A-Za-z0-9-_=]+");
     std::smatch tokenMatch;
     if (!std::regex_search(js, tokenMatch, tokenRe)) { LOG_WARN("devtoken: no JWT in js"); return ""; }
-    LOG_DEBUG("devtoken: got token %.30s...", tokenMatch.str().c_str());
+    LOG_DEBUG("dev_token_received");
     return tokenMatch.str();
 }
 
@@ -326,17 +332,17 @@ std::string AppleApi::getLyrics(const std::string& adamId,
     if (!curl.perform()) { LOG_WARN("lyrics curl perform failed"); return ""; }
     long lstatus = curl.getResponseCode();
     if (lstatus != 200) {
-        LOG_WARN("lyrics http status=%ld body=%.300s", lstatus, resp.c_str());
+        LOG_WARN("lyrics_http_status=%ld", lstatus);
         return "";
     }
 
     cJSON* root = cJSON_Parse(resp.c_str());
-    if (!root) { LOG_WARN("lyrics bad json: %.200s", resp.c_str()); return ""; }
+    if (!root) { LOG_WARN("lyrics_invalid_json"); return ""; }
     std::string lyrics;
     cJSON* errors = cJSON_GetObjectItemCaseSensitive(root, "errors");
     if (errors && cJSON_GetArraySize(errors) > 0) {
         cJSON_Delete(root);
-        LOG_WARN("lyrics API errors: %.200s", resp.c_str());
+        LOG_WARN("lyrics_api_error");
         return "";
     }
     cJSON* data = cJSON_GetObjectItemCaseSensitive(root, "data");
@@ -399,18 +405,17 @@ std::string AppleApi::getWebPlayback(const std::string& adamId,
     if (!curl.perform()) { LOG_WARN("webplayback curl perform failed"); return ""; }
     long wstatus = curl.getResponseCode();
     if (wstatus != 200) {
-        LOG_WARN("webplayback http status=%ld body=%.300s", wstatus, resp.c_str());
+        LOG_WARN("webplayback_http_status=%ld", wstatus);
         return "";
     }
 
     cJSON* root = cJSON_Parse(resp.c_str());
-    if (!root) { LOG_WARN("webplayback bad json: %.200s", resp.c_str()); return ""; }
+    if (!root) { LOG_WARN("webplayback_invalid_json"); return ""; }
     std::string m3u8;
 
     cJSON* failureType = cJSON_GetObjectItemCaseSensitive(root, "failureType");
     if (cJSON_IsString(failureType)) {
-        LOG_WARN("webplayback rejected failureType=%s body=%.200s",
-                 failureType->valuestring, resp.c_str());
+        LOG_WARN("webplayback_rejected");
         cJSON_Delete(root);
         return "";
     }
@@ -418,7 +423,7 @@ std::string AppleApi::getWebPlayback(const std::string& adamId,
     cJSON* errors = cJSON_GetObjectItemCaseSensitive(root, "errors");
     if (errors && cJSON_GetArraySize(errors) > 0) {
         cJSON_Delete(root);
-        LOG_WARN("webplayback API errors: %.200s", resp.c_str());
+        LOG_WARN("webplayback_api_error");
         return "";
     }
 
@@ -493,15 +498,14 @@ bool AppleApi::getLicense(const std::string& adamId,
 
     if (!curl.perform()) { LOG_WARN("license curl perform failed"); return false; }
     long lcode = curl.getResponseCode();
-    LOG_DEBUG("license: dev=%.24s... music=%.24s... uri=%.60s",
-              devToken.c_str(), musicToken.c_str(), uri.c_str());
+    LOG_DEBUG("license_response_received");
     if (lcode != 200) {
-        LOG_WARN("license http status=%ld body=%.300s", lcode, resp.c_str());
+        LOG_WARN("license_http_status=%ld", lcode);
         return false;
     }
 
     cJSON* root = cJSON_Parse(resp.c_str());
-    if (!root) { LOG_WARN("license bad json: %.200s", resp.c_str()); return false; }
+    if (!root) { LOG_WARN("license_invalid_json"); return false; }
 
     bool ok = false;
     cJSON* errors = cJSON_GetObjectItemCaseSensitive(root, "errors");
@@ -512,7 +516,7 @@ bool AppleApi::getLicense(const std::string& adamId,
         outRenew = renewAfter ? (int)cJSON_GetNumberValue(renewAfter) : 0;
         ok = true;
     } else {
-        LOG_WARN("license response without license field: %.200s", resp.c_str());
+        LOG_WARN("license_missing_field");
     }
     cJSON_Delete(root);
     return ok;

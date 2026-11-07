@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include "auth_policy.h"
 
 /* ---- JSON response helpers ---- */
 struct LiteResponse {
@@ -23,7 +24,7 @@ struct TokenCache {
     bool loaded = false;
 
     void load();
-    void save();
+    bool save();
 };
 
 extern TokenCache g_tokens;
@@ -104,9 +105,11 @@ extern bool g_code_from_file;
 void install_hooks();
 struct shared_ptr init_ctx();
 bool login(struct shared_ptr ctx);
+AuthOutcome last_auth_outcome();
 void set_device_info(const char* device_info);
 void set_base_dir(const char* dir);
 void set_credentials(const char* user, const char* pass);
+void set_verification_code_provider(bool (*provider)(std::string&));
 /* Align original wrapper: offline accounts use download path, online use play path. */
 std::string get_m3u8(const std::string& adamId);
 std::string get_key(const std::string& adamId, const std::string& uri,

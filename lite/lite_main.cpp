@@ -19,6 +19,7 @@
 #include <pthread.h>
 #include "cJSON.h"
 #include "logger.h"
+#include "auth_input.h"
 
 /* ---- httplib.h (header-only HTTP server) ---- */
 /* NDK API 22 does not declare getifaddrs in headers, but it is available at runtime */
@@ -35,6 +36,7 @@ extern "C" void freeifaddrs(struct ifaddrs* __ptr) { }
 static std::string g_host = "127.0.0.1";
 static int g_port = 12340;
 static bool g_login_only = false;
+static bool g_login_stdin = false;
 static std::string g_login_credentials;
 static std::string g_proxy;
 /* Device info: <client>/<version>/<platform>/<osver>/<model>/<build>/<locale>/<lang>/<android-id>.
@@ -169,9 +171,9 @@ static void load_token_cache() {
 }
 
 /* Caller must hold g_tokens_mutex. */
-static void save_token_cache() {
+static bool save_token_cache() {
     g_tokens.base_dir = g_base_dir;
-    g_tokens.save();
+    return g_tokens.save();
 }
 
 /* Fetch dev token for Lyrics/License/WebPlayback.  The web endpoints must use
@@ -468,7 +470,7 @@ static void signal_worker() {
 /* ============================== */
 
 static void print_usage() {
-    LOG_INFO("usage: lite [--login user:pass] [--host 127.0.0.1] [--port 12340]");
+    LOG_INFO("usage: lite [--login user:pass | --login-stdin] [--host 127.0.0.1] [--port 12340]");
     LOG_INFO("            [--device-info STR] [--base-dir data] [--proxy URL] [--debug]");
     LOG_INFO("            [--log-level debug|info|warn|error] [--log-file PATH]");
     LOG_INFO("            [--token-refresh-interval SECONDS] [--cors]");
@@ -491,16 +493,9 @@ int main(int argc, char* argv[]) {
     const char* args_file = getenv("LITE_ARGS_FILE");
     if (args_file && *args_file) {
         std::ifstream af(args_file);
-        std::string line;
-        while (std::getline(af, line)) {
-            if (!line.empty() && (line.back() == '\r')) line.pop_back();
-                        line.erase(std::remove_if(line.begin(), line.end(), [](char c){ return c == 0; }), line.end());
-            if (line.empty()) continue;
-            size_t b = line.find_first_not_of(" 	");
-            if (b == std::string::npos) continue;
-            size_t e = line.find_last_not_of(" 	");
-            line = line.substr(b, e - b + 1);
-            if (!line.empty()) cmdline_args.push_back(line);
+        if (!af || !auth_input::read_arguments(af, cmdline_args)) {
+            LOG_ERROR("invalid_arguments_file");
+            return 1;
         }
     } else {
         for (int i = 1; i < argc; i++) cmdline_args.push_back(argv[i]);
@@ -509,7 +504,7 @@ int main(int argc, char* argv[]) {
         std::string arg = cmdline_args[i];
         if (arg == "--host" && i + 1 < cmdline_args.size()) g_host = cmdline_args[++i];
         else if (arg == "--port" && i + 1 < cmdline_args.size()) g_port = atoi(cmdline_args[++i].c_str());
-        else if (arg == "--debug") { g_log_level = "debug"; g_ssl_verify_disabled = true; }
+        else if (arg == "--debug") { g_log_level = "debug"; }
         else if (arg == "--code-from-file") g_code_from_file = true;
         else if (arg == "--log-level" && i + 1 < cmdline_args.size()) g_log_level = cmdline_args[++i];
         else if (arg == "--log-file" && i + 1 < cmdline_args.size()) g_log_file = cmdline_args[++i];
@@ -523,6 +518,7 @@ int main(int argc, char* argv[]) {
             g_login_only = true;
             g_login_credentials = cmdline_args[++i];
         }
+        else if (arg == "--login-stdin") { g_login_only = true; g_login_stdin = true; }
         else if (arg == "--device-info" && i + 1 < cmdline_args.size()) g_device_info_override = cmdline_args[++i];
         else if (arg == "--base-dir" && i + 1 < cmdline_args.size()) g_base_dir = cmdline_args[++i];
         else if (arg == "--help" || arg == "-h") {
@@ -530,7 +526,7 @@ int main(int argc, char* argv[]) {
             return 0;
         }
         else {
-            LOG_ERROR("unknown argument: %s", arg.c_str());
+            LOG_ERROR("invalid_argument");
             print_usage();
             return 1;
         }
@@ -542,15 +538,31 @@ int main(int argc, char* argv[]) {
     g_tokens.base_dir = g_base_dir;
 
     if (g_login_only) {
-        auto colon = g_login_credentials.find(':');
-        if (colon == std::string::npos) {
-            LOG_ERROR("invalid login format, expected user:pass");
-            return 1;
+        std::string username, password;
+        if (g_login_stdin) {
+            if (!g_login_credentials.empty() || !auth_input::read_credentials(stdin, username, password)) {
+                LOG_ERROR("auth_invalid_credentials");
+                return 1;
+            }
+            set_verification_code_provider(+[](std::string& code) {
+                LOG_INFO("auth_verification_code_requested");
+                fflush(stdout);
+                return auth_input::read_code(stdin, code);
+            });
+        } else {
+            auto colon = g_login_credentials.find(':');
+            if (colon == std::string::npos) {
+                LOG_ERROR("invalid login format, expected user:pass");
+                return 1;
+            }
+            username = g_login_credentials.substr(0, colon);
+            password = g_login_credentials.substr(colon + 1);
         }
-        std::string username = g_login_credentials.substr(0, colon);
-        std::string password = g_login_credentials.substr(colon + 1);
         set_credentials(username.c_str(), password.c_str());
         g_resolved_device_info = resolve_device_info(username);
+        auth_input::wipe(username); auth_input::wipe(password);
+        auth_input::wipe(g_login_credentials);
+        for (auto& arg : cmdline_args) auth_input::wipe(arg);
 
         LOG_INFO("wrapper-lite login mode");
 
@@ -570,9 +582,8 @@ int main(int argc, char* argv[]) {
                 LOG_ERROR("login failed");
                 _exit(1);
             }
-            LOG_INFO("login successful");
             if (!cache_login_tokens()) {
-                LOG_ERROR("failed to cache account info");
+                LOG_ERROR("login_token_cache_failed");
                 _exit(1);
             }
             _exit(0);
@@ -596,15 +607,18 @@ int main(int argc, char* argv[]) {
         g_tokens.storefront_id = normalize_storefront_id(readFile(std::string(g_base_dir) + "/STOREFRONT_ID"));
         g_tokens.dev_token = readFile(std::string(g_base_dir) + "/DEV_TOKEN");
         g_tokens.music_token = readFile(std::string(g_base_dir) + "/MUSIC_TOKEN");
-        if (g_tokens.dev_token.empty() || g_tokens.music_token.empty()) {
-            LOG_ERROR("failed to cache account info");
+        if (g_tokens.dev_token.empty() || g_tokens.music_token.empty() || g_tokens.storefront_id.empty()) {
+            LOG_ERROR("login_token_cache_failed");
             return 1;
         }
         {
             std::lock_guard<std::mutex> lock(g_tokens_mutex);
-            save_token_cache();
+            if (!save_token_cache()) {
+                LOG_ERROR("login_token_cache_failed");
+                return 1;
+            }
         }
-        LOG_INFO("login complete, exiting");
+        LOG_INFO("login_complete");
         return 0;
     }
 
@@ -657,10 +671,8 @@ int main(int argc, char* argv[]) {
         });
     }
 
-    svr.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
-        (void)res;
-        LOG_INFO("request: %s %s", req.method.c_str(), req.target.c_str());
-        return httplib::Server::HandlerResponse::Unhandled;
+    svr.set_logger([](const httplib::Request&, const httplib::Response& res) {
+        LOG_DEBUG("http_response_status=%d", res.status);
     });
 
     svr.Get("/m3u8", handle_m3u8);
@@ -694,8 +706,8 @@ int main(int argc, char* argv[]) {
     svr.set_exception_handler([](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {
         try {
             if (ep) std::rethrow_exception(ep);
-        } catch (const std::exception& e) {
-            LOG_ERROR("handler exception: %s", e.what());
+        } catch (const std::exception&) {
+            LOG_ERROR("handler_exception");
         } catch (...) {
             LOG_ERROR("handler exception: unknown");
         }

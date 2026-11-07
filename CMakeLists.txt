@@ -61,6 +61,7 @@ find_library(MEDIAPLATFORM_LIB mediaplatform PATHS ${SYSTEM_LIB_DIR})
 find_library(CXX_SHARED_LIB c++_shared PATHS ${SYSTEM_LIB_DIR})
 find_library(CURL_SHARED_LIB curl PATHS ${SYSTEM_LIB_DIR})
 find_library(LOG_SHARED_LIB log PATHS ${SYSTEM_LIB_DIR})
+find_library(COREFOUNDATION_LIB CoreFoundation PATHS ${SYSTEM_LIB_DIR})
 
 # ---- wrapper-lite: single-port HTTP service ----
 set(LITE_SOURCE
@@ -89,6 +90,7 @@ target_link_libraries(lite PRIVATE
     ${STORESERVICESCORE_LIB}
     ${MEDIAPLATFORM_LIB}
     ${LOG_SHARED_LIB}
+    ${COREFOUNDATION_LIB}
     ${CURL_SHARED_LIB}
     dl
 )
