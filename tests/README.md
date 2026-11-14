@@ -13,7 +13,8 @@ token data; long-password 2FA input; actual HTTP status/body-size options; and
 certificate/hostname verification against local fixtures. The HTTP/TLS fixtures
 use loopback sockets only and need no account or external service.
 
-They first verify the pinned runtime hashes with `tests/verify_library_hashes.sh`.
+They first verify the pinned runtime hashes, including the bundled CA trust store,
+with `tests/verify_library_hashes.sh`.
 Each C++ fixture has a 120-second timeout, including reentrant authentication
 event tests (registration, state queries, nested attempts, handler exceptions,
 presence flags, dialog events, code-provider ordering and final outcomes).
@@ -24,6 +25,12 @@ cancel/deadline/unregistration, dispatch exceptions, reentrant capture destructi
 and the worker limit. `auth_sdk_interaction.cpp` uses SDK boundary mocks to check
 explicit local/Retry choices, field maps, credentials/repeated codes, object
 references, single-thread/exactly-once completion, failure latching and privacy.
+`network_config.cpp` checks resolver precedence, IPv4/IPv6 and input bounds;
+loopback TLS and launcher tests check explicit CA selection and guest environment
+forwarding. The token fixture also exercises FairPlay subscription status,
+including missing/short results, exceptions and reference cleanup. The native
+authentication fixture checks real SDK FairPlay reference counts across 32 local
+status queries without an account or network interface.
 
 In a sandbox that prevents LeakSanitizer from inspecting processes, run
 `ASAN_OPTIONS=detect_leaks=0 bash tests/run_checks.sh`. AddressSanitizer,

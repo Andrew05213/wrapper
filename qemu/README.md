@@ -78,6 +78,8 @@ Windows WHPX uses:
 | `GUEST_PORT` | `12340` | guest port |
 | `MEMORY` | `512` | guest memory in MB |
 | `SMP` | `2` | guest CPU count |
+| `LITE_DNS` | — | forwarded as `--dns`; defaults to slirp DNS `10.0.2.3` inside the guest |
+| `LITE_CA_BUNDLE` | — | forwarded as `--ca-bundle`; path must exist inside the guest |
 | `LITE_QEMU_TB_SIZE` | `64` | TCG translation cache limit in MiB (1–4096) |
 | `LITE_QEMU_ACCEL` | auto | force acceleration |
 | `QEMU_BIN` | auto | QEMU binary path |

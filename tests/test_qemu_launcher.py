@@ -20,12 +20,19 @@ class LauncherTests(unittest.TestCase):
                         '-o', str(cls.binary)], check=True)
         (cls.work / 'qemu').mkdir()
         cls.fake = cls.work / 'fake-qemu'
-        cls.fake.write_text('#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n')
+        cls.fake.write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+if os.environ.get('CAPTURE_GUEST_ARGS'):
+    argument = next(x for x in sys.argv if x.startswith('name=lite_args,file='))
+    Path(os.environ['CAPTURE_GUEST_ARGS']).write_text(Path(argument.split('file=', 1)[1]).read_text())
+print(json.dumps(sys.argv[1:]))
+''')
         cls.fake.chmod(0o755)
 
     def run_launcher(self, *args, **env):
         child_env = os.environ.copy()
-        for key in ('LITE_QEMU_TB_SIZE', 'LITE_QEMU_ACCEL', 'QEMU_BIN'):
+        for key in ('LITE_QEMU_TB_SIZE', 'LITE_QEMU_ACCEL', 'QEMU_BIN', 'LITE_DNS', 'LITE_CA_BUNDLE'):
             child_env.pop(key, None)
         child_env.update(env)
         return subprocess.run([str(self.binary), '--qemu-bin', str(self.fake), *args],
@@ -69,6 +76,21 @@ class LauncherTests(unittest.TestCase):
         result = self.run_launcher('--tb-size')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('requires a value', result.stderr)
+
+    def test_network_environment_reaches_guest_and_cli_wins(self):
+        capture = self.work / 'guest-args'
+        for cli in (False, True):
+            with self.subTest(cli=cli):
+                flags = ['--dns', '9.9.9.9', '--ca-bundle', '/data/custom.pem'] if cli else []
+                self.qemu_args('--accel', 'tcg', *flags,
+                               LITE_DNS='1.1.1.1', LITE_CA_BUNDLE='/data/environment.pem',
+                               CAPTURE_GUEST_ARGS=str(capture))
+                args = capture.read_text().splitlines()
+                self.assertEqual(args.count('--dns'), 1)
+                self.assertEqual(args.count('--ca-bundle'), 1)
+                self.assertEqual(args[args.index('--dns') + 1], '9.9.9.9' if cli else '1.1.1.1')
+                self.assertEqual(args[args.index('--ca-bundle') + 1],
+                                 '/data/custom.pem' if cli else '/data/environment.pem')
 
 
 if __name__ == '__main__':

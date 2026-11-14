@@ -54,6 +54,16 @@ int main() {
     g_reqCtx = init_ctx();
     puts("AUTH_ABI_CONTEXT");
     assert(!g_ssl_verify_disabled);
+    {
+        library_shared_ptr fairplay;
+        _ZN17storeservicescore14RequestContext8fairPlayEv(&fairplay.value, g_reqCtx.obj);
+        assert(fairplay.value.obj && fairplay.value.ctrl_blk);
+        auto* owners = reinterpret_cast<long*>(fairplay.value.ctrl_blk) + 1;
+        const long before = __atomic_load_n(owners, __ATOMIC_RELAXED);
+        for (int i = 0; i < 32; ++i) assert(!offline_available_impl());
+        assert(__atomic_load_n(owners, __ATOMIC_RELAXED) == before);
+    }
+    puts("FAIRPLAY_STATUS_ABI_PASSED");
     // Initial account-choice dialog is local and translated by the library.
     library_shared_ptr flow;
     _ZNSt6__ndk110shared_ptrIN17storeservicescore16AuthenticateFlowEE11make_sharedIJRNS0_INS1_14RequestContextEEEEEES3_DpOT_(&flow.value, &g_reqCtx);

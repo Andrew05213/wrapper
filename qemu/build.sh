@@ -53,13 +53,13 @@ echo "[build] copying rootfs (this may take a moment)..."
 
 echo "[build] installing init..."
 install -m 0755 "${OUT_DIR}/init" "$STAGE/init"
-if [[ ! -s "$STAGE/usr/local/android/cert.pem" ]]; then
+if [[ -n "${SSL_CERT_FILE:-}" || ! -s "$STAGE/system/etc/security/cacert.pem" ]]; then
     CA_BUNDLE="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
     if [[ ! -s "$CA_BUNDLE" ]]; then
         echo "[build] CA bundle missing; install ca-certificates or set SSL_CERT_FILE" >&2
         exit 1
     fi
-    install -D -m 0644 "$CA_BUNDLE" "$STAGE/usr/local/android/cert.pem"
+    install -D -m 0644 "$CA_BUNDLE" "$STAGE/system/etc/security/cacert.pem"
 fi
 
 echo "[build] copying kernel modules..."

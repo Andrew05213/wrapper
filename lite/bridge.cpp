@@ -62,8 +62,11 @@ void init(const char* device_info_str) {
     setenv("ANDROID_DNS_MODE", "local", 1);
     setenv("ANDROID_DATA", "/data", 1);
     setenv("ANDROID_ROOT", "/system", 1);
-    static const char* resolvers[2] = {"223.5.5.5", "223.6.6.6"};
-    _resolv_set_nameservers_for_net(0, resolvers, 2, ".");
+    std::ifstream resolv("/etc/resolv.conf");
+    const auto servers = network_config::nameservers(resolv);
+    std::vector<const char*> resolvers;
+    for (const auto& server : servers) resolvers.push_back(server.c_str());
+    _resolv_set_nameservers_for_net(0, resolvers.data(), static_cast<int>(resolvers.size()), ".");
 
     union std_string conf1 = new_std_string(device_infos[8] ? device_infos[8] : "");
     union std_string conf2 = new_std_string("");

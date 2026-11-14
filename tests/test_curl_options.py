@@ -28,7 +28,7 @@ class CurlOptionsTests(unittest.TestCase):
                         '-addext', 'subjectAltName=DNS:localhost'],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    def request(self, tls=False, trusted=False, host='localhost', debug=False):
+    def request(self, tls=False, trusted=False, host='localhost', debug=False, ca_bundle=None):
         class Handler(http.server.BaseHTTPRequestHandler):
             def handle(self):
                 try:
@@ -58,7 +58,10 @@ class CurlOptionsTests(unittest.TestCase):
             env = os.environ.copy()
             env['SSL_CERT_FILE'] = str(self.work / ('cert.pem' if trusted else 'missing.pem'))
             url = f'{"https" if tls else "http"}://{host}:{server.server_port}/'
-            result = subprocess.run([str(self.binary), '1' if debug else '0', url],
+            command = [str(self.binary), '1' if debug else '0', url]
+            if ca_bundle is not None:
+                command.append(str(ca_bundle))
+            result = subprocess.run(command,
                                     env=env, text=True, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             return result.stdout.strip()
@@ -79,6 +82,11 @@ class CurlOptionsTests(unittest.TestCase):
 
     def test_debug_remains_explicit_opt_out(self):
         self.assertEqual(self.request(tls=True, debug=True), '1 201 ok')
+
+    def test_explicit_ca_overrides_legacy_environment(self):
+        self.assertEqual(self.request(tls=True, ca_bundle=self.work / 'cert.pem'), '1 201 ok')
+        self.assertEqual(self.request(tls=True, trusted=True,
+                                      ca_bundle=self.work / 'missing.pem'), '0 0')
 
 
 if __name__ == '__main__':

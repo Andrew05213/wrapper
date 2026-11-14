@@ -36,15 +36,9 @@ CurlEasy::CurlEasy() : handle(nullptr), ok(false) {
     if (ok) {
         ok = setOptInt(CURLOPT_SSL_VERIFYPEER, g_ssl_verify_disabled ? 0 : 1) &&
              setOptInt(CURLOPT_SSL_VERIFYHOST, g_ssl_verify_disabled ? 0 : 2);
-        const char* configured = std::getenv("SSL_CERT_FILE");
-        const char* paths[] = {configured, "/usr/local/android/cert.pem",
-                               "/system/etc/security/cacert.pem"};
-        for (const char* path : paths) {
-            if (path && *path && std::ifstream(path).good()) {
-                ok = ok && setOptStr(CURLOPT_CAINFO, path);
-                break;
-            }
-        }
+        // Explicit CA paths fail closed at perform(), never fall back to a
+        // different trust store when the requested file is missing.
+        ok = ok && setOptStr(CURLOPT_CAINFO, get_ca_bundle());
     }
 }
 

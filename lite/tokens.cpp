@@ -170,20 +170,18 @@ static char* get_account_storefront_id_impl() {
 }
 
 int offline_available_impl() {
-    struct shared_ptr* fairplay = (struct shared_ptr*)malloc(16);
-    memset(fairplay, 0, 16);
-    _ZN17storeservicescore14RequestContext8fairPlayEv(fairplay, g_reqCtx.obj);
-    if (!fairplay->obj) {
-        free(fairplay);
-        return 0;
-    }
-    struct std_vector fairplay_status = _ZN17storeservicescore8FairPlay21getSubscriptionStatusEv(fairplay->obj);
-    char* begin_ptr = (char*)fairplay_status.begin;
-    char* end_ptr = (char*)fairplay_status.end;
-    free(fairplay);
-    if (!begin_ptr || !end_ptr || (end_ptr - begin_ptr) < 32) return 0;
-    char* second_item_ptr = begin_ptr + 16;
-    int state = *(int*)((char*)second_item_ptr + 8);
+    library_shared_ptr fairplay;
+    _ZN17storeservicescore14RequestContext8fairPlayEv(&fairplay.value, g_reqCtx.obj);
+    if (!fairplay.value.obj) return 0;
+    const auto status = _ZN17storeservicescore8FairPlay21getSubscriptionStatusEv(fairplay.value.obj);
+    // The pinned SDK returns vector<pair<uint64_t, int>>: 16-byte trivial
+    // entries, not shared_ptrs. Its allocator buffer still needs operator delete.
+    library_object_guard status_owner(status.begin, [](void* p) { ::operator delete(p); });
+    const auto begin = reinterpret_cast<uintptr_t>(status.begin);
+    const auto end = reinterpret_cast<uintptr_t>(status.end);
+    if (!begin || end < begin || (end - begin) % 16 || end - begin < 32) return 0;
+    int state;
+    memcpy(&state, static_cast<char*>(status.begin) + 24, sizeof(state));
     if (state == 2 || state == 3) return 1;
     return 0;
 }
@@ -216,14 +214,14 @@ bool refresh_tokens(std::string& out_storefront, std::string& out_dev_token, std
     std::string sf(storefront);
     free(storefront);
 
-    char* devToken = get_dev_token_impl();
+    std::unique_ptr<char, decltype(&free)> devToken(get_dev_token_impl(), &free);
     if (!devToken) {
         LOG_WARN("failed to get dev token");
         return false;
     }
-    write_token_file(std::string(g_base_dir) + "/DEV_TOKEN", std::string(devToken));
+    write_token_file(std::string(g_base_dir) + "/DEV_TOKEN", std::string(devToken.get()));
 
-    char* musicToken = get_music_user_token_impl(devToken, sf);
+    char* musicToken = get_music_user_token_impl(devToken.get(), sf);
     std::string music;
     if (musicToken) {
         music = musicToken;

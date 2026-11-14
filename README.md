@@ -118,6 +118,8 @@ All responses use:
 | `--host` | `127.0.0.1` | listen address |
 | `--port` | `12340` | listen port |
 | `--base-dir` | `data` | data directory |
+| `--dns` | auto | up to eight IPv4/IPv6 resolver addresses, separated by commas, semicolons or whitespace; overrides `/etc/resolv.conf` |
+| `--ca-bundle` | bundled | CA bundle for wrapper HTTP requests; an unreadable explicit path fails rather than choosing another trust store |
 | `--device-info` | auto | override the entire device-info string (see [Device info](#device-info)) |
 | `--proxy` | — | proxy URL |
 | `--debug` | off | debug logging; TLS verification remains enabled |
@@ -172,6 +174,8 @@ Environment variables (fallbacks; command-line flags take precedence):
 | `MEMORY` | `512` | guest memory in MB |
 | `SMP` | `2` | guest CPU count |
 | `LITE_QEMU_TB_SIZE` | `64` | TCG translation cache limit in MiB |
+| `LITE_DNS` | — | fallback for `--dns`; forwarded by the QEMU launcher |
+| `LITE_CA_BUNDLE` | — | fallback for `--ca-bundle`; forwarded by the QEMU launcher (path inside guest) |
 | `LITE_QEMU_ACCEL` | auto | force acceleration |
 | `QEMU_BIN` | auto | QEMU binary path |
 
@@ -198,8 +202,18 @@ the TCG cache setting.
 
 - Release and Debug builds verify TLS certificates and hostnames. `--debug`
   only changes logging verbosity.
-- The QEMU build includes a CA bundle at `/usr/local/android/cert.pem`. Set
-  `SSL_CERT_FILE` to supply a different bundle when building or running natively.
+- The pinned Mozilla CA bundle is included at `/system/etc/security/cacert.pem`;
+  `/usr/local/android/cert.pem` links to it for the SDK's default trust-store path.
+  `--ca-bundle` takes precedence over `LITE_CA_BUNDLE`, then legacy `SSL_CERT_FILE`,
+  for wrapper HTTP requests. Configure these before starting service/authentication
+  threads. Runtime paths are inside the chroot or guest; this flag does not change
+  the closed SDK's own curl configuration. To change the packaged SDK trust store,
+  set `SSL_CERT_FILE` when building QEMU assets; it replaces the staged bundle.
+- DNS precedence is `--dns`, `LITE_DNS`, then `/etc/resolv.conf`; only when none
+  supplies a usable resolver does it fall back to `8.8.8.8,8.8.4.4`. Native
+  launchers and Docker copy the host/container resolver file into the chroot.
+  QEMU defaults to slirp DNS at `10.0.2.3`; explicit overrides must be reachable
+  from the guest (a host loopback stub is not a guest resolver).
 
 ## AMDL integration
 

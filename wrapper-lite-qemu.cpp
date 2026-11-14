@@ -5,6 +5,8 @@
 #include <vector>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
+#include <utility>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -390,6 +392,18 @@ int main(int argc, char** argv) {
             else if (a == "--qemu-bin") g_qemuBin = v;
         } else {
             liteArgs.push_back(a);
+        }
+    }
+
+    // Host environment is not inherited by the guest. Forward configuration
+    // through its existing argument transport; explicit guest flags win.
+    for (const auto& config : {std::make_pair("LITE_DNS", "--dns"),
+                               std::make_pair("LITE_CA_BUNDLE", "--ca-bundle")}) {
+        const char* value = std::getenv(config.first);
+        if (!value || !*value) continue;
+        if (std::find(liteArgs.begin(), liteArgs.end(), config.second) == liteArgs.end()) {
+            liteArgs.push_back(config.second);
+            liteArgs.push_back(value);
         }
     }
 

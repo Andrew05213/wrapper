@@ -435,7 +435,7 @@ alone nor rebuilding only the QEMU launcher updates an installed desktop guest.
 
 The `offline-checks` workflow runs on work/lite pushes, PRs and manual dispatch.
 It verifies `tests/library_hashes.sha256` against the exact tracked runtime file
-set (98 libraries plus linker64), builds lite, runs host sanitizers/HTTP/TLS/
+set (98 libraries, linker64 and the bundled CA trust store), builds lite, runs host sanitizers/HTTP/TLS/
 launcher checks, then both ABI fixtures in a disposable QEMU initramfs with no
 NIC or data disk. Guest logs are retained and checked for private fixture values.
 The packaging workflow also checks the runtime hashes before building artifacts.

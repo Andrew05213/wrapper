@@ -3,8 +3,9 @@
 bool g_ssl_verify_disabled = false;
 
 int main(int argc, char** argv) {
-    assert(argc == 3);
+    assert(argc == 3 || argc == 4);
     g_ssl_verify_disabled = argv[1][0] == '1';
+    if (argc == 4) assert(set_ca_bundle(argv[3]));
     CurlEasy curl;
     assert(curl.ok);
     assert(curl.setOptInt(CURLOPT_TIMEOUT_MS, 3000));

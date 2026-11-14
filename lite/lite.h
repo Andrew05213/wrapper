@@ -9,6 +9,7 @@
 #include "auth_policy.h"
 #include "auth_events.h"
 #include "auth_interaction.h"
+#include "network_config.h"
 
 /* ---- JSON response helpers ---- */
 struct LiteResponse {
