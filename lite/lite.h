@@ -116,6 +116,11 @@ void set_credentials(const char* user, const char* pass);
 void set_verification_code_provider(bool (*provider)(std::string&));
 /* Align original wrapper: offline accounts use download path, online use play path. */
 std::string get_m3u8(const std::string& adamId);
+struct M3u8PlaybackResult {
+    std::string url;
+    int authorization_status = 0; // 401 or 403 when explicitly reported by the SDK
+};
+M3u8PlaybackResult get_m3u8_playback(const std::string& adamId);
 std::string get_key(const std::string& adamId, const std::string& uri,
                              uint8_t* ctx, uint8_t* state,
                              uint64_t* rcx, uint64_t* rax, uint64_t* rdx,

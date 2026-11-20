@@ -291,7 +291,8 @@ IMPORT_EXTERN void _ZN21RequestContextManager9configureERKNSt6__ndk110shared_ptr
 IMPORT_EXTERN struct shared_ptr *_ZN22SVPlaybackLeaseManager12requestAssetERKmRKNSt6__ndk16vectorINS2_12basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEENS7_IS9_EEEERKb(
 	void *, void *, unsigned long *, struct std_vector *, uint8_t *
 );
-IMPORT_EXTERN int _ZNK23SVPlaybackAssetResponse13hasValidAssetEv(void *);
+IMPORT_EXTERN uint8_t _ZNK23SVPlaybackAssetResponse13hasValidAssetEv(void *);
+IMPORT_EXTERN const int *_ZNK23SVPlaybackAssetResponse9errorCodeEv(void *);
 IMPORT_EXTERN struct shared_ptr *_ZNK23SVPlaybackAssetResponse13playbackAssetEv(void *);
 IMPORT_EXTERN union std_string *_ZNK17storeservicescore13PlaybackAsset9URLStringEv(void *, uint8_t *);
 

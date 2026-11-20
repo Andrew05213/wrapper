@@ -43,4 +43,4 @@ void setup_services();
 int offline_available_impl();
 
 const char* get_m3u8_download(unsigned long adam);
-const char* get_m3u8_play(unsigned long adam);
+const char* get_m3u8_play(unsigned long adam, int* authorization_status = nullptr);

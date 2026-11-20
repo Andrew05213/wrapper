@@ -16,6 +16,8 @@ extern "C" long NfcRKVnxuKZy04KWbdFu71Ou(void*, uint32_t, void*, void*, size_t) 
 
 static int live = 0, requests = 0, strings = 0;
 static int mode = 0;
+static std::string lookups;
+static int playback_error = 0;
 struct resource { int refs = 1; resource() { ++live; } ~resource() { --live; } };
 static struct shared_ptr owned() {
     auto* p = new resource;
@@ -51,6 +53,7 @@ extern "C" void* _ZN17storeservicescore15PurchaseRequest23setProcessDialogAction
 extern "C" void* _ZN17storeservicescore15PurchaseRequest12setURLBagKeyERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(void* p, union std_string*) { return p; }
 extern "C" void* _ZN17storeservicescore15PurchaseRequest16setBuyParametersERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(void* p, union std_string*) { return p; }
 extern "C" void* _ZN17storeservicescore15PurchaseRequest3runEv(void* p) {
+    lookups += 'D';
     if (mode == 1) throw std::runtime_error("purchase failed");
     return p;
 }
@@ -77,18 +80,21 @@ extern "C" union std_string* _ZNK17storeservicescore13PurchaseAsset3URLEv(void* 
 extern "C" struct shared_ptr* _ZN22SVPlaybackLeaseManager12requestAssetERKmRKNSt6__ndk16vectorINS2_12basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEENS7_IS9_EEEERKb(
     void* output, void*, unsigned long*, struct std_vector* formats, uint8_t*) {
     auto* out = static_cast<struct shared_ptr*>(output);
+    lookups += 'P';
     assert(static_cast<char*>(formats->end) - static_cast<char*>(formats->begin) == sizeof(union std_string));
     assert(strcmp(std_string_data(static_cast<union std_string*>(formats->begin)), "HLS") == 0);
     if (mode != 2) *out = owned();
     return out;
 }
-extern "C" int _ZNK23SVPlaybackAssetResponse13hasValidAssetEv(void*) { return mode != 3; }
+extern "C" uint8_t _ZNK23SVPlaybackAssetResponse13hasValidAssetEv(void*) { return mode != 3 && mode != 8; }
+extern "C" const int* _ZNK23SVPlaybackAssetResponse9errorCodeEv(void*) { return &playback_error; }
 extern "C" struct shared_ptr* _ZNK23SVPlaybackAssetResponse13playbackAssetEv(void*) {
     static struct shared_ptr borrowed = {&borrowed, nullptr};
     return mode == 4 ? nullptr : &borrowed;
 }
 extern "C" union std_string* _ZNK17storeservicescore13PlaybackAsset9URLStringEv(void* out, uint8_t*) {
     if (mode == 5) throw std::runtime_error("play URL failed");
+    if (mode == 9) return static_cast<union std_string*>(out);
     output_string(static_cast<union std_string*>(out));
     return static_cast<union std_string*>(out);
 }
@@ -118,4 +124,40 @@ int main() {
         }
     }
     puts("16000 M3U8 success/error/exception cases: all owners released");
+
+    auto check_legacy = [](int offline, int fixture, const char* calls, bool success) {
+        offlineFlag = offline;
+        mode = fixture;
+        lookups.clear();
+        assert(!get_m3u8("123").empty() == success);
+        assert(lookups == calls);
+    };
+    check_legacy(0, 0, "P", true);
+    check_legacy(1, 0, "D", true);
+    check_legacy(0, 8, "PD", true); // Playback fails, download succeeds.
+    check_legacy(1, 6, "DP", true); // Download fails, playback succeeds.
+
+    for (int offline : {0, 1}) {
+        offlineFlag = offline;
+        mode = 0;
+        lookups.clear();
+        auto result = get_m3u8_playback("123");
+        assert(!result.url.empty() && !result.authorization_status && lookups == "P");
+        for (int fixture : {2, 4, 9}) { // Missing response, asset or URL.
+            mode = fixture;
+            lookups.clear();
+            result = get_m3u8_playback("123");
+            assert(result.url.empty() && !result.authorization_status && lookups == "P");
+        }
+        mode = 8;
+        for (int code : {0, 401, 403, 404}) {
+            playback_error = code;
+            lookups.clear();
+            result = get_m3u8_playback("123");
+            assert(result.url.empty() && lookups == "P");
+            assert(result.authorization_status == (code == 401 || code == 403 ? code : 0));
+        }
+    }
+    assert(live == 0 && requests == 0 && strings == 0);
+    puts("M3U8 lookup order, playback-only failures and authorization status passed");
 }

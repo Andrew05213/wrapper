@@ -7,6 +7,8 @@
 bool g_ssl_verify_disabled = false;
 extern "C" void _ZN13mediaplatform4DataC1EPKvmb(void*, const void*, size_t, bool);
 extern "C" void _ZN13mediaplatform4DataD2Ev(void*);
+extern "C" void _ZN23SVPlaybackAssetResponseC1ERKiRKNSt6__ndk112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEE(
+    void*, const int*, const union std_string*);
 
 int main() {
     static_assert(sizeof(std::string) == sizeof(union std_string), "string ABI");
@@ -23,6 +25,17 @@ int main() {
         CurlEasy curl;
         assert(curl.ok && curl.setOptInt(CURLOPT_POSTFIELDSIZE, 3));
         assert(curl.getResponseCode() == 0); // valid handle, no HTTP request yet
+    }
+    {
+        // Construct the SDK's local failure response with an empty message.
+        // No asset or string allocations need releasing from this response.
+        alignas(std::max_align_t) char response[120] = {};
+        const int denied = 403;
+        const auto message = new_std_string("");
+        _ZN23SVPlaybackAssetResponseC1ERKiRKNSt6__ndk112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEE(
+            response, &denied, &message);
+        assert(!_ZNK23SVPlaybackAssetResponse13hasValidAssetEv(response));
+        assert(*_ZNK23SVPlaybackAssetResponse9errorCodeEv(response) == denied);
     }
     for (int i = 0; i < 10000; ++i) {
         library_shared_ptr message;

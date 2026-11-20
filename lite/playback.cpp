@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 #include <mutex>
+#include <memory>
 #include <dlfcn.h>
 #include <link.h>
 
@@ -43,7 +44,7 @@ const char* get_m3u8_download(unsigned long adam) {
     return url.data() ? strdup(url.data()) : nullptr;
 }
 
-const char* get_m3u8_play(unsigned long adam) {
+const char* get_m3u8_play(unsigned long adam, int* authorization_status) {
     union std_string HLS = new_std_string("HLS");
     /* vector<string> bounds are byte addresses spanning one entire string. */
     struct std_vector HLSParam = {&HLS, &HLS + 1, &HLS + 1};
@@ -54,7 +55,13 @@ const char* get_m3u8_play(unsigned long adam) {
         &result.value, leaseMgr, &adam, &HLSParam, &z0);
 
     if (!result.value.obj) return nullptr;
-    if (!_ZNK23SVPlaybackAssetResponse13hasValidAssetEv(result.value.obj)) return nullptr;
+    if (!_ZNK23SVPlaybackAssetResponse13hasValidAssetEv(result.value.obj)) {
+        if (authorization_status) {
+            const int* code = _ZNK23SVPlaybackAssetResponse9errorCodeEv(result.value.obj);
+            if (code && (*code == 401 || *code == 403)) *authorization_status = *code;
+        }
+        return nullptr;
+    }
 
     struct shared_ptr* playbackAsset = _ZNK23SVPlaybackAssetResponse13playbackAssetEv(result.value.obj);
     if (!playbackAsset || !playbackAsset->obj) return nullptr;
@@ -270,6 +277,18 @@ std::string get_m3u8(const std::string& adamId) {
     if (!m3u8) return "";
     std::string result(m3u8);
     free((void*)m3u8);
+    return result;
+}
+
+M3u8PlaybackResult get_m3u8_playback(const std::string& adamId) {
+    M3u8PlaybackResult result;
+    const unsigned long adam = strtoul(adamId.c_str(), nullptr, 10);
+    if (!adam) return result;
+
+    std::lock_guard<std::mutex> lock(g_playback_mutex);
+    std::unique_ptr<char, decltype(&free)> url(
+        const_cast<char*>(get_m3u8_play(adam, &result.authorization_status)), &free);
+    if (url) result.url = url.get();
     return result;
 }
 

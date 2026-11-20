@@ -102,12 +102,17 @@ All responses use:
 
 | Endpoint | Method | Parameters |
 |----------|--------|------------|
-| `/m3u8` | GET | `adamId` |
+| `/m3u8` | GET | `adamId`, optional `source=playback` for HLS only |
 | `/key` | GET | `adamId`, `uri` (required; the prefetch `skd://itunes.apple.com/P000000000/s1/e1` is rejected unless `adamId=0`) |
 | `/lyrics` | GET | `adamId`, optional `language`, optional `syllable` (`1`=word-timed syllable-lyrics with translations/romanization, `0`=line-timed lyrics converted in-wrapper **and still carrying translations/romanization as whole-line text**), optional `script` (transliteration script, default `en-Latn`) |
 | `/webplayback` | GET | `adamId` |
 | `/license` | POST | JSON: `adamId`, `challenge`, `uri`, optional `drm-type` (`wv`=Widevine (default), `pr`=PlayReady) |
 | `/status` | GET | returns `regions` (list of storefront codes this wrapper can serve) |
+
+With `source=playback`, `/m3u8` only uses the SDK playback query with format
+`HLS`. An unavailable URL returns business code `404`. If the SDK reports
+`401` or `403`, the response uses that HTTP status and business code.
+Omitting `source` uses the existing playback/download selection and fallback.
 
 ## lite arguments
 

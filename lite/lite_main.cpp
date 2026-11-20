@@ -243,7 +243,23 @@ static void handle_m3u8(const httplib::Request& req, httplib::Response& res) {
         return;
     }
 
-    std::string m3u8 = get_m3u8(adamId);
+    std::string m3u8;
+    if (req.has_param("source")) {
+        if (req.get_param_value_count("source") != 1 || req.get_param_value("source") != "playback") {
+            res.set_content(json_error(400, "invalid source"), "application/json");
+            return;
+        }
+        auto result = get_m3u8_playback(adamId);
+        if (result.authorization_status) {
+            res.status = result.authorization_status;
+            res.set_content(json_error(result.authorization_status, "playback authorization denied"),
+                            "application/json");
+            return;
+        }
+        m3u8 = std::move(result.url);
+    } else {
+        m3u8 = get_m3u8(adamId);
+    }
     if (m3u8.empty()) {
         res.set_content(json_error(404, "failed to get m3u8"), "application/json");
         return;
