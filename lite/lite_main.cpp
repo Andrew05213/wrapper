@@ -17,6 +17,7 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <pthread.h>
+#include "token_cache_io.h"
 #include "cJSON.h"
 #include "logger.h"
 #include "auth_input.h"
@@ -175,7 +176,18 @@ static void load_token_cache() {
 /* Caller must hold g_tokens_mutex. */
 static bool save_token_cache() {
     g_tokens.base_dir = g_base_dir;
-    return g_tokens.save();
+    return g_tokens.save(g_login_only);
+}
+
+static std::string read_login_token_file(const std::string& path, TokenStage stage) {
+    std::string content;
+    auto result = read_token_cache_file(path, content);
+    if (result == TokenFileResult::Ok && stage == TokenStage::StorefrontFile) {
+        content = normalize_storefront_id(content);
+        if (content.empty()) result = TokenFileResult::Invalid;
+    }
+    report_token_file_failure(stage, result);
+    return content;
 }
 
 /* Fetch dev token for Lyrics/License/WebPlayback.  The web endpoints must use
@@ -634,14 +646,13 @@ int main(int argc, char* argv[]) {
 
         /* Read token files (written by the child) into this clean process. */
         auto readFile = [](const std::string& path) {
-            std::ifstream f(path);
-            if (!f) return std::string();
-            std::string c((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-            while (!c.empty() && (c.back() == ' ' || c.back() == 10 || c.back() == 13)) c.pop_back();
-            return c;
+            const auto name = path.substr(path.find_last_of('/') + 1);
+            const auto stage = name == "DEV_TOKEN" ? TokenStage::DeveloperTokenFile : TokenStage::MusicTokenFile;
+            return read_login_token_file(path, stage);
         };
         g_tokens.base_dir = g_base_dir;
-        g_tokens.storefront_id = normalize_storefront_id(readFile(std::string(g_base_dir) + "/STOREFRONT_ID"));
+        g_tokens.storefront_id = read_login_token_file(
+            std::string(g_base_dir) + "/STOREFRONT_ID", TokenStage::StorefrontFile);
         g_tokens.dev_token = readFile(std::string(g_base_dir) + "/DEV_TOKEN");
         g_tokens.music_token = readFile(std::string(g_base_dir) + "/MUSIC_TOKEN");
         if (g_tokens.dev_token.empty() || g_tokens.music_token.empty() || g_tokens.storefront_id.empty()) {

@@ -1,6 +1,7 @@
 #include "lite.h"
 #include "cJSON.h"
 #include "logger.h"
+#include "token_cache_io.h"
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -147,38 +148,30 @@ void TokenCache::load() {
 }
 
 bool TokenCache::save() {
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "dev_token", dev_token.c_str());
-    cJSON_AddStringToObject(root, "music_token", music_token.c_str());
-    cJSON_AddStringToObject(root, "storefront_id", storefront_id.c_str());
-    char* printed = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
+    return save(false);
+}
+
+bool TokenCache::save(bool login_diagnostics) {
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(cJSON_CreateObject(), &cJSON_Delete);
+    const bool ready = root &&
+        cJSON_AddStringToObject(root.get(), "dev_token", dev_token.c_str()) &&
+        cJSON_AddStringToObject(root.get(), "music_token", music_token.c_str()) &&
+        cJSON_AddStringToObject(root.get(), "storefront_id", storefront_id.c_str());
+    std::unique_ptr<char, decltype(&cJSON_free)> printed(
+        ready ? cJSON_PrintUnformatted(root.get()) : nullptr, &cJSON_free);
     if (!printed) {
         LOG_WARN("failed to serialize token cache");
+        if (login_diagnostics)
+            report_token_diagnostic(TokenStage::JsonCache, TokenReason::CacheWriteFailed);
         return false;
     }
 
     std::string path = (base_dir.empty() ? "data" : base_dir) + "/token_cache.json";
-    std::string tmp = path + ".tmp";
-    FILE* fp = fopen(tmp.c_str(), "w");
-    if (!fp) {
-        LOG_WARN("failed to write token cache");
-        cJSON_free(printed);
-        return false;
-    }
-    const size_t length = strlen(printed);
-    const bool written = fwrite(printed, 1, length, fp) == length;
-    const bool closed = fclose(fp) == 0;
-    cJSON_free(printed);
-    if (!written || !closed) {
-        LOG_WARN("token_cache_write_failed");
-        remove(tmp.c_str());
-        return false;
-    }
-
-    if (rename(tmp.c_str(), path.c_str()) != 0) {
-        LOG_WARN("failed to replace token cache");
-        remove(tmp.c_str());
+    const auto result = replace_token_cache_file(path, printed.get(), strlen(printed.get()));
+    if (result != TokenFileResult::Ok) {
+        if (result == TokenFileResult::ReplaceFailed) LOG_WARN("failed to replace token cache");
+        else LOG_WARN("token_cache_write_failed");
+        if (login_diagnostics) report_token_file_failure(TokenStage::JsonCache, result);
         return false;
     }
     LOG_INFO("token cache saved");

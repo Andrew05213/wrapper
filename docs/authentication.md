@@ -245,6 +245,48 @@ read, and the token cache is successfully saved. Token persistence failure is
 `login_token_cache_failed` and a nonzero exit. Callers must wait for process
 completion rather than infer login completion from an intermediate event.
 
+## Login token diagnostics
+
+Wrapper Lite emits a separate line on login stdout with the prefix
+`WRAPPER_TOKEN_EVENT:` followed by a JSON object of type `login_token_diagnostic`.
+At the applicable log level it also writes the same payload to the normal log.
+AMDL 1.0.4 skips the new prefix. Its existing
+`AMDL_NATIVE_EVENT:{"type":"login_failure","reason":"token_cache_failed"}`
+record and exit code 1 remain the terminal failure signal.
+
+New AMDL readers can add a decoder for the separate prefix. The field whitelist
+is `type`, `stage`, `reason`, `attempt`, `usedCache`, and optional
+`httpStatus`. `attempt` is 1 through 5 for a child refresh, or 0 for parent
+readback or the final JSON write. `usedCache` is true only when a Music User
+Token fetch failed and the existing raw `MUSIC_TOKEN` was accepted as a fallback.
+`httpStatus` is an integer from 100 through 599, present only when a response
+for the corresponding token request was observed. It is independent of the
+earlier Store authentication HTTP status.
+
+| Stage | Reason codes |
+| --- | --- |
+| `storefront` | `storefront_fetch_failed` |
+| `developer_token` | `developer_token_fetch_failed` |
+| `music_user_token` | `music_user_token_fetch_failed` |
+| `music_token_fallback` | `cache_read_failed`, `cache_invalid`, `cache_fallback_used` |
+| `storefront_file`, `developer_token_file`, `music_token_file` | `cache_read_failed`, `cache_invalid`, `cache_write_failed`, `cache_replace_failed` |
+| `token_cache_json` | `cache_write_failed`, `cache_replace_failed` |
+| `refresh` | `retry_succeeded`, `retry_exhausted` |
+
+```text
+WRAPPER_TOKEN_EVENT:{"type":"login_token_diagnostic","stage":"music_user_token","reason":"music_user_token_fetch_failed","attempt":1,"usedCache":false,"httpStatus":200}
+WRAPPER_TOKEN_EVENT:{"type":"login_token_diagnostic","stage":"music_token_fallback","reason":"cache_fallback_used","attempt":1,"usedCache":true,"httpStatus":200}
+```
+
+Here the HTTP request returned a response without a usable new token. The child
+used the existing token and the parent still had to read back and save the cache.
+A missing or unreadable fallback reports `cache_read_failed`, while unusable
+contents report `cache_invalid`. Those failures can be followed by a retry.
+`retry_succeeded` describes the child refresh, and `retry_exhausted` reports
+that all five attempts failed. Raw file write failures are reported at the
+point of failure. The parent still decides whether the resulting files are
+usable. Use the original terminal event or process exit to decide final outcome.
+
 ## Legacy CLI dialog and code handling (no interaction handler)
 
 The local initial dialog in this library is kind `2`, has no input fields, and

@@ -28,6 +28,7 @@ struct TokenCache {
 
     void load();
     bool save();
+    bool save(bool login_diagnostics);
 };
 
 extern TokenCache g_tokens;

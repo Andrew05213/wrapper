@@ -2,6 +2,7 @@
 
 #include "auth_policy.h"
 #include "import.h"
+#include "sdk_http_response.h"
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -68,14 +69,7 @@ inline AuthDiagnostics inspect_auth_response(void* response, struct shared_ptr* 
         d.protocol_error = auth_protocol_number(dictionary, "errorCode");
         CFRelease(dictionary);
     }
-    auto* http = _ZNK17storeservicescore11URLResponse18underlyingResponseEv(url_response->obj);
-    if (http && http->obj) {
-        // Bundled mediaplatform::HTTPResponse extends the 128-byte HTTPMessage
-        // with an int status at +128. responseWithStatus and the guest ABI test
-        // verify this offset; AuthenticateResponse::status is a different enum.
-        int status = 0;
-        memcpy(&status, static_cast<const char*>(http->obj) + 128, sizeof(status));
-        if (status >= 100 && status <= 599) d.http_status.set(status);
-    }
+    const int status = sdk_http_status(_ZNK17storeservicescore11URLResponse18underlyingResponseEv(url_response->obj));
+    if (status) d.http_status.set(status);
     return d;
 }

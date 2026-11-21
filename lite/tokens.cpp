@@ -1,5 +1,7 @@
 #include "internal.h"
 #include "library_ownership.h"
+#include "sdk_http_response.h"
+#include "token_cache_io.h"
 #include <cstddef>
 #include <memory>
 #include "cJSON.h"
@@ -57,12 +59,14 @@ static char* get_guid() {
 }
 
 // Every response accessor below borrows storage from the live URLRequest.
-static char* response_token(void* request, const char* name) {
+static char* response_token(void* request, const char* name, int* http_status = nullptr) {
     auto* error = _ZNK17storeservicescore10URLRequest5errorEv(request);
-    if (!error || error->obj) return nullptr;
+    if ((!error || error->obj) && !http_status) return nullptr;
     auto* response = _ZNK17storeservicescore10URLRequest8responseEv(request);
     if (!response || !response->obj) return nullptr;
     auto* underlying = _ZNK17storeservicescore11URLResponse18underlyingResponseEv(response->obj);
+    if (http_status) *http_status = sdk_http_status(underlying);
+    if (!error || error->obj) return nullptr;
     if (!underlying || !underlying->obj) return nullptr;
     void* data = *reinterpret_cast<void**>(static_cast<char*>(underlying->obj) + 48);
     std::string body;
@@ -90,7 +94,7 @@ static struct shared_ptr make_http_message(const char* url, const char* method) 
     return httpMessage;
 }
 
-static char* get_dev_token_impl() {
+static char* get_dev_token_impl(int* http_status = nullptr) {
     library_shared_ptr message_owner;
     message_owner.value = make_http_message("https://sf-api-token-service.itunes.apple.com/apiToken", "GET");
     struct shared_ptr& httpMessage = message_owner.value;
@@ -111,10 +115,11 @@ static char* get_dev_token_impl() {
     _ZN17storeservicescore10URLRequest19setRequestParameterERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_(urlRequest, &versionName, &versionValue);
     _ZN17storeservicescore10URLRequest3runEv(urlRequest);
 
-    return response_token(urlRequest, "token");
+    return response_token(urlRequest, "token", http_status);
 }
 
-static char* get_music_user_token_impl(const char* authToken, const std::string& storefront) {
+static char* get_music_user_token_impl(const char* authToken, const std::string& storefront,
+                                       int* http_status) {
     std::unique_ptr<char, decltype(&free)> guid(get_guid(), &free);
     if (!guid) return nullptr;
 
@@ -159,7 +164,7 @@ static char* get_music_user_token_impl(const char* authToken, const std::string&
     library_object_guard request_owner(urlRequest, _ZN17storeservicescore10URLRequestD2Ev);
     _ZN17storeservicescore10URLRequest3runEv(urlRequest);
 
-    return response_token(urlRequest, "music_token");
+    return response_token(urlRequest, "music_token", http_status);
 }
 
 static char* get_account_storefront_id_impl() {
@@ -186,50 +191,69 @@ int offline_available_impl() {
     return 0;
 }
 
-static bool write_token_file(const std::string& path, const std::string& content) {
-    std::string tmp = path + ".tmp";
-    FILE* fp = fopen(tmp.c_str(), "w");
-    if (!fp) {
-        LOG_WARN("token_file_write_failed");
-        return false;
-    }
-    fwrite(content.data(), 1, content.size(), fp);
-    fclose(fp);
-    if (rename(tmp.c_str(), path.c_str()) != 0) {
-        LOG_WARN("token_file_replace_failed");
-        remove(tmp.c_str());
-        return false;
-    }
-    return true;
+static void write_token_file(const std::string& path, const std::string& content,
+                             TokenStage stage, unsigned attempt) {
+    const auto result = replace_token_cache_file(path, content.data(), content.size());
+    if (result == TokenFileResult::WriteFailed) LOG_WARN("token_file_write_failed");
+    if (result == TokenFileResult::ReplaceFailed) LOG_WARN("token_file_replace_failed");
+    if (attempt) report_token_file_failure(stage, result, attempt);
 }
 
-bool refresh_tokens(std::string& out_storefront, std::string& out_dev_token, std::string& out_music_token) {
+using OwnedToken = std::unique_ptr<char, decltype(&free)>;
+
+template <typename Fetch>
+static OwnedToken fetch_token(Fetch fetch, TokenStage stage, TokenReason reason,
+                              unsigned attempt, const int* http_status = nullptr) {
+    OwnedToken token(nullptr, &free);
+    try {
+        token.reset(fetch());
+    } catch (...) {
+        if (attempt) report_token_diagnostic(stage, reason, attempt, http_status ? *http_status : 0);
+        throw;
+    }
+    if (attempt && (!token || !*token))
+        report_token_diagnostic(stage, reason, attempt, http_status ? *http_status : 0);
+    return token;
+}
+
+static bool refresh_tokens_impl(std::string& out_storefront, std::string& out_dev_token,
+                                std::string& out_music_token, unsigned attempt) {
     std::lock_guard<std::mutex> lock(g_token_mutex);
 
-    char* storefront = get_account_storefront_id_impl();
+    auto storefront = fetch_token(get_account_storefront_id_impl, TokenStage::Storefront,
+                                  TokenReason::StorefrontFetchFailed, attempt);
     if (!storefront) {
         LOG_WARN("failed to get storefront ID");
         return false;
     }
-    std::string sf(storefront);
-    free(storefront);
+    std::string sf(storefront.get());
 
-    std::unique_ptr<char, decltype(&free)> devToken(get_dev_token_impl(), &free);
+    int dev_http = 0;
+    auto devToken = fetch_token([&] { return get_dev_token_impl(attempt ? &dev_http : nullptr); },
+                                TokenStage::DeveloperToken, TokenReason::DeveloperTokenFetchFailed,
+                                attempt, &dev_http);
     if (!devToken) {
         LOG_WARN("failed to get dev token");
         return false;
     }
-    write_token_file(std::string(g_base_dir) + "/DEV_TOKEN", std::string(devToken.get()));
+    write_token_file(std::string(g_base_dir) + "/DEV_TOKEN", devToken.get(),
+                     TokenStage::DeveloperTokenFile, attempt);
 
-    char* musicToken = get_music_user_token_impl(devToken.get(), sf);
+    int music_http = 0;
+    auto musicToken = fetch_token([&] {
+        return get_music_user_token_impl(devToken.get(), sf, attempt ? &music_http : nullptr);
+    }, TokenStage::MusicUserToken, TokenReason::MusicUserTokenFetchFailed, attempt, &music_http);
     std::string music;
     if (musicToken) {
-        music = musicToken;
-        free(musicToken);
+        music = musicToken.get();
     } else {
-        music = read_token_file(std::string(g_base_dir) + "/MUSIC_TOKEN");
+        const auto result = read_token_cache_file(std::string(g_base_dir) + "/MUSIC_TOKEN", music);
         if (!music.empty()) {
             LOG_WARN("music_token_cache_used");
+            if (attempt) report_token_diagnostic(TokenStage::MusicTokenFallback,
+                TokenReason::CacheFallbackUsed, attempt, music_http, true);
+        } else if (attempt) {
+            report_token_file_failure(TokenStage::MusicTokenFallback, result, attempt);
         }
     }
 
@@ -238,33 +262,48 @@ bool refresh_tokens(std::string& out_storefront, std::string& out_dev_token, std
         return false;
     }
 
-    write_token_file(std::string(g_base_dir) + "/STOREFRONT_ID", sf);
-    write_token_file(std::string(g_base_dir) + "/MUSIC_TOKEN", music);
+    write_token_file(std::string(g_base_dir) + "/STOREFRONT_ID", sf, TokenStage::StorefrontFile, attempt);
+    write_token_file(std::string(g_base_dir) + "/MUSIC_TOKEN", music, TokenStage::MusicTokenFile, attempt);
 
-    std::string freshDev = read_token_file(std::string(g_base_dir) + "/DEV_TOKEN");
+    std::string freshDev;
+    const auto read_result = read_token_cache_file(std::string(g_base_dir) + "/DEV_TOKEN", freshDev);
+    if (attempt) report_token_file_failure(TokenStage::DeveloperTokenFile, read_result, attempt);
     out_storefront = std::move(sf);
     out_dev_token = std::move(freshDev);
     out_music_token = std::move(music);
     return true;
 }
 
+bool refresh_tokens(std::string& out_storefront, std::string& out_dev_token, std::string& out_music_token) {
+    return refresh_tokens_impl(out_storefront, out_dev_token, out_music_token, 0);
+}
+
 bool cache_login_tokens() {
     /* Login already succeeded, so a token fetch failure is most likely
        transient; retry a few times before treating the login as failed. */
-    static const int kAttempts = 5;
     std::string sf, dev, music;
-    for (int attempt = 1; attempt <= kAttempts; ++attempt) {
-        if (refresh_tokens(sf, dev, music)) {
+    for (unsigned attempt = 1; attempt <= kLoginTokenAttempts; ++attempt) {
+        bool refreshed;
+        try {
+            refreshed = refresh_tokens_impl(sf, dev, music, attempt);
+        } catch (...) {
+            // SDK exceptions can include sensitive response text. Preserve the
+            // terminal failure path and avoid sending the exception to stderr.
+            return false;
+        }
+        if (refreshed) {
             g_tokens.storefront_id = sf;
             g_tokens.dev_token = dev;
             g_tokens.music_token = music;
             LOG_INFO("account info cached successfully");
+            if (attempt > 1) report_token_diagnostic(TokenStage::Refresh, TokenReason::RetrySucceeded, attempt);
             return true;
         }
-        LOG_WARN("token fetch failed after login (attempt %d/%d)", attempt, kAttempts);
-        if (attempt < kAttempts) sleep(2);
+        LOG_WARN("token fetch failed after login (attempt %u/%u)", attempt, kLoginTokenAttempts);
+        if (attempt < kLoginTokenAttempts) sleep(2);
     }
-    LOG_ERROR("failed to cache account info after %d attempts", kAttempts);
+    LOG_ERROR("failed to cache account info after %u attempts", kLoginTokenAttempts);
+    report_token_diagnostic(TokenStage::Refresh, TokenReason::RetryExhausted, kLoginTokenAttempts);
     return false;
 }
 
