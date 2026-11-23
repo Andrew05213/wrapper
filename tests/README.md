@@ -108,3 +108,7 @@ provided completion bases, text-field response map, CredentialsRequest/Response
 constructors and code challenges. It verifies UI-selected Retry and native
 ownership without running AuthenticateFlow's network request. The guest remains
 network-disabled, account-free and ephemeral.
+
+The native processing fixture checks block boundaries, isolation, cancellation,
+failure prefixes, contention and summary privacy. For the release-mode timing
+benchmark and measurement definitions, see [Lite native audio processing](../docs/native-processing.md).

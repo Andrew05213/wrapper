@@ -2,6 +2,7 @@
 #include "library_ownership.h"
 #include "native_streams.h"
 #include <cstddef>
+#include <cinttypes>
 #include "dobby.h"
 #include <cstdio>
 #include <cstdlib>
@@ -320,9 +321,15 @@ class OwnedNativeContext final : public NativeDecryptContext {
 public:
     library_shared_ptr owner;
     void* kd = nullptr;
-    bool decrypt(const std::string& input, std::string& output) override {
-        output = input;
-        NfcRKVnxuKZy04KWbdFu71Ou(kd, 5, &output[0], &output[0], output.size());
+    bool decrypt(const std::string& input, std::string& output, NativeTotals& times) override {
+        {
+            NativeTimer timer(times.copy_ns);
+            output = input;
+        }
+        {
+            NativeTimer timer(times.sdk_ns);
+            NfcRKVnxuKZy04KWbdFu71Ou(kd, 5, &output[0], &output[0], output.size());
+        }
         return true;
     }
 };
@@ -351,34 +358,81 @@ std::unique_ptr<NativeDecryptContext> acquire_native_context(
 }
 
 NativeStreams native_streams;
+
+const char* stream_end_name(NativeStreamEnd end) {
+    switch (end) {
+    case NativeStreamEnd::Close: return "close";
+    case NativeStreamEnd::Idle: return "idle";
+    case NativeStreamEnd::Failure: return "failure";
+    case NativeStreamEnd::Shutdown: return "shutdown";
+    }
+    return "unknown";
+}
+
+void format_native_totals(char (&out)[384], const NativeTotals& t) {
+    snprintf(out, sizeof(out), "requests=%" PRIu64 " bytes=%" PRIu64 " completed_bytes=%" PRIu64
+             " wait_ns=%" PRIu64 " create_ns=%" PRIu64 " copy_ns=%" PRIu64 " sdk_ns=%" PRIu64
+             " held_ns=%" PRIu64 " bytes_per_second=%.0f", t.requests, t.bytes, t.completed_bytes,
+             t.wait_ns, t.create_ns, t.copy_ns, t.sdk_ns, t.held_ns, t.bytes_per_second());
+}
+
+// Declared before the lock guard so even failure summaries are logged after unlocking.
+struct StreamReporter {
+    NativeReports reports;
+    ~StreamReporter() {
+        for (const auto& report : reports) {
+            char first[384], reuse[384];
+            format_native_totals(first, report.first);
+            format_native_totals(reuse, report.reuse);
+            LOG_INFO("native_stream_summary end=%s first={%s} reuse={%s}",
+                     stream_end_name(report.end), first, reuse);
+        }
+    }
+};
+}
+
+static bool valid_native_stream(const std::string& stream, const std::string& adam,
+                                const std::string& uri) {
+    if (!FHinstance || stream.size() != 32 || adam.empty() || adam.size() > 20 ||
+        uri.size() > 2048 || uri.find("skd://itunes.apple.com/") != 0 ||
+        (adam != "0" && uri == "skd://itunes.apple.com/P000000000/s1/e1")) return false;
+    for (char c : stream) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    for (char c : adam) if (c < '0' || c > '9') return false;
+    for (unsigned char c : uri) if (c <= 32 || c == 127) return false;
+    return true;
+}
+
+static bool valid_native_block(const std::string& input) {
+    return !input.empty() && input.size() <= (1 << 20) && input.size() % 16 == 0;
 }
 
 bool native_decrypt(const std::string& stream, const std::string& adam,
                     const std::string& uri, const std::string& input,
                     std::string& output) {
     output.clear();
-    if (!FHinstance || stream.size() != 32 || adam.empty() || adam.size() > 20 ||
-        uri.size() > 2048 || uri.find("skd://itunes.apple.com/") != 0 ||
-        input.empty() || input.size() > (1 << 20) || input.size() % 16 ||
-        (adam != "0" && uri == "skd://itunes.apple.com/P000000000/s1/e1")) return false;
-    for (char c : stream) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
-    for (char c : adam) if (c < '0' || c > '9') return false;
-    for (unsigned char c : uri) if (c <= 32 || c == 127) return false;
+    if (!valid_native_block(input) || !valid_native_stream(stream, adam, uri)) return false;
+    StreamReporter reporter;
+    const auto entered = NativeClock::now();
     std::lock_guard<std::mutex> lock(g_playback_mutex);
-    return native_streams.decrypt(stream, adam, uri, input, output, acquire_native_context);
+    const auto acquired = NativeClock::now();
+    return native_streams.decrypt(stream, adam, uri, input, output, acquire_native_context,
+                                  reporter.reports, entered, acquired, acquired);
 }
 
 void native_decrypt_close(const std::string& stream) {
+    StreamReporter reporter;
     std::lock_guard<std::mutex> lock(g_playback_mutex);
-    native_streams.close(stream);
+    native_streams.close(stream, reporter.reports);
 }
 
 void native_decrypt_expire() {
+    StreamReporter reporter;
     std::lock_guard<std::mutex> lock(g_playback_mutex);
-    native_streams.expire();
+    native_streams.expire(reporter.reports);
 }
 
 void native_decrypt_close_all() {
+    StreamReporter reporter;
     std::lock_guard<std::mutex> lock(g_playback_mutex);
-    native_streams.clear();
+    native_streams.clear(reporter.reports);
 }

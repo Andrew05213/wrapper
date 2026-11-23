@@ -8,7 +8,7 @@ static bool fail_decrypt = false, throw_decrypt = false;
 struct Context final : NativeDecryptContext {
     Context() { ++live; ++created; }
     ~Context() { --live; }
-    bool decrypt(const std::string& input, std::string& output) override {
+    bool decrypt(const std::string& input, std::string& output, NativeTotals&) override {
         if (throw_decrypt) throw std::runtime_error("decrypt");
         if (fail_decrypt) return false;
         output = input;
@@ -20,53 +20,67 @@ int main() {
     using Clock = NativeStreams::Clock;
     auto time = Clock::time_point(std::chrono::seconds(1000));
     NativeStreams streams;
+    NativeReports reports;
+    auto acquired = Clock::now();
+    auto entered = acquired - std::chrono::nanoseconds(40);
     auto factory = [](const std::string&, const std::string&) {
         return std::unique_ptr<NativeDecryptContext>(new Context);
     };
     const std::string sample(16, 'x');
     std::string output;
+    auto decrypt = [&](const std::string& stream, const std::string& adam, const std::string& uri) {
+        return streams.decrypt(stream, adam, uri, sample, output, factory, reports, entered, acquired, time);
+    };
     // Thousands of tracks must not accumulate FairPlay owners.
     for (int i = 0; i < 2048; ++i) {
-        assert(streams.decrypt("a", std::to_string(i), "key", sample, output, factory, time));
+        assert(decrypt("a", std::to_string(i), "key"));
         assert(output == sample && live == 1);
-        streams.close("a");
-        streams.close("a");
+        streams.close("a", reports);
+        streams.close("a", reports);
         assert(live == 0);
     }
-    assert(streams.decrypt("a", "1", "key", sample, output, factory, time));
-    assert(streams.decrypt("b", "2", "key", sample, output, factory, time));
+    assert(decrypt("a", "1", "key"));
+    assert(decrypt("b", "2", "key"));
     int before = created;
-    assert(streams.decrypt("a", "1", "key", sample, output, factory, time));
+    assert(decrypt("a", "1", "key"));
     assert(created == before && live == 2);
+    assert(reports.size() == 2048);
+    reports.clear();
     // Changing a key drops only that stream's old owner.
-    assert(streams.decrypt("a", "1", "other", sample, output, factory, time));
+    assert(decrypt("a", "1", "other"));
     assert(created == before + 1 && live == 2);
-    streams.close("a");
+    streams.close("a", reports);
     assert(live == 1);
-    assert(streams.decrypt("b", "2", "key", sample, output, factory, time));
-    streams.clear();
+    assert(reports.size() == 1 && reports[0].end == NativeStreamEnd::Close);
+    assert(reports[0].first.requests == 2 && reports[0].reuse.requests == 1);
+    assert(reports[0].first.wait_ns == 80 && reports[0].reuse.wait_ns == 40);
+    assert(reports[0].first.completed_bytes == 32 && reports[0].reuse.bytes == 16);
+    assert(decrypt("b", "2", "key"));
+    streams.clear(reports);
     assert(live == 0);
 
     // Simulate a crashed client: full capacity recovers without a DELETE.
     for (int i = 0; i < 32; ++i)
-        assert(streams.decrypt(std::to_string(i), "1", "key", sample, output, factory, time));
-    assert(!streams.decrypt("full", "1", "key", sample, output, factory, time));
+        assert(decrypt(std::to_string(i), "1", "key"));
+    assert(!decrypt("full", "1", "key"));
     assert(output.empty() && live == 32);
-    auto later = time + std::chrono::seconds(119);
-    assert(streams.decrypt("0", "1", "key", sample, output, factory, later));
-    streams.expire(time + std::chrono::seconds(120));
+    auto expire_at = time + std::chrono::seconds(120);
+    time += std::chrono::seconds(119);
+    assert(decrypt("0", "1", "key"));
+    streams.expire(reports, expire_at);
+    assert(reports.back().end == NativeStreamEnd::Idle);
     assert(live == 1); // The active stream survives stale-stream collection.
-    assert(streams.decrypt("new", "2", "key", sample, output, factory, later));
+    assert(decrypt("new", "2", "key"));
     assert(live == 2);
-    streams.clear();
+    streams.clear(reports);
 
     fail_decrypt = true;
-    assert(!streams.decrypt("bad", "1", "key", sample, output, factory, time));
+    assert(!decrypt("bad", "1", "key"));
     assert(output.empty() && live == 0);
     fail_decrypt = false;
     throw_decrypt = true;
     try {
-        streams.decrypt("bad", "1", "key", sample, output, factory, time);
+        decrypt("bad", "1", "key");
         assert(false);
     } catch (const std::runtime_error&) {}
     assert(output.empty() && live == 0);
@@ -74,7 +88,9 @@ int main() {
     auto missing = [](const std::string&, const std::string&) {
         return std::unique_ptr<NativeDecryptContext>();
     };
-    assert(!streams.decrypt("missing", "1", "key", sample, output, missing, time));
+    assert(!streams.decrypt("missing", "1", "key", sample, output, missing, reports, entered, acquired, time));
     assert(live == 0);
+    assert(reports.back().end == NativeStreamEnd::Failure);
+    assert(reports.back().first.completed_bytes == 0 && reports.back().first.requests == 1);
     puts("native streams: lifetime, capacity, idle recovery and failure cleanup passed");
 }
