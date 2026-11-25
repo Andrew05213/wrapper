@@ -71,6 +71,7 @@ set(LITE_SOURCE
     lite/auth_interaction.cpp
     lite/auth_sdk_interaction.cpp
     lite/playback.cpp
+    lite/native_batch_http.cpp
     lite/tokens.cpp
     lite/apple_api.cpp
 )
