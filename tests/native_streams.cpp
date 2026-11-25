@@ -8,10 +8,11 @@ static bool fail_decrypt = false, throw_decrypt = false;
 struct Context final : NativeDecryptContext {
     Context() { ++live; ++created; }
     ~Context() { --live; }
-    bool decrypt(const std::string& input, std::string& output, NativeTotals&) override {
+    bool decrypt(native_batch::Block input, std::string& output, NativeTotals& times) override {
+        ++times.sdk_calls;
         if (throw_decrypt) throw std::runtime_error("decrypt");
         if (fail_decrypt) return false;
-        output = input;
+        output.assign(input.data, input.size);
         return true;
     }
 };
@@ -27,9 +28,11 @@ int main() {
         return std::unique_ptr<NativeDecryptContext>(new Context);
     };
     const std::string sample(16, 'x');
+    const native_batch::Block block{sample.data(), sample.size()};
     std::string output;
     auto decrypt = [&](const std::string& stream, const std::string& adam, const std::string& uri) {
-        return streams.decrypt(stream, adam, uri, sample, output, factory, reports, entered, acquired, time);
+        return streams.decrypt(stream, adam, uri, block, output, factory, reports, entered, acquired, time)
+            == native_batch::Status::Complete;
     };
     // Thousands of tracks must not accumulate FairPlay owners.
     for (int i = 0; i < 2048; ++i) {
@@ -54,6 +57,8 @@ int main() {
     assert(reports.size() == 1 && reports[0].end == NativeStreamEnd::Close);
     assert(reports[0].first.requests == 2 && reports[0].reuse.requests == 1);
     assert(reports[0].first.wait_ns == 80 && reports[0].reuse.wait_ns == 40);
+    assert(reports[0].transport_requests == 3 && reports[0].first.sdk_calls == 2 &&
+           reports[0].reuse.sdk_calls == 1);
     assert(reports[0].first.completed_bytes == 32 && reports[0].reuse.bytes == 16);
     assert(decrypt("b", "2", "key"));
     streams.clear(reports);
@@ -88,9 +93,11 @@ int main() {
     auto missing = [](const std::string&, const std::string&) {
         return std::unique_ptr<NativeDecryptContext>();
     };
-    assert(!streams.decrypt("missing", "1", "key", sample, output, missing, reports, entered, acquired, time));
+    assert(streams.decrypt("missing", "1", "key", block, output, missing, reports, entered, acquired, time)
+           == native_batch::Status::BlockFailed);
     assert(live == 0);
     assert(reports.back().end == NativeStreamEnd::Failure);
-    assert(reports.back().first.completed_bytes == 0 && reports.back().first.requests == 1);
+    assert(reports.back().first.completed_bytes == 0 && reports.back().first.requests == 1 &&
+           reports.back().first.sdk_calls == 0);
     puts("native streams: lifetime, capacity, idle recovery and failure cleanup passed");
 }

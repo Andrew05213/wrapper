@@ -14,8 +14,10 @@ void* FHinstance = reinterpret_cast<void*>(1);
 int offlineFlag = 0;
 static int keys = 0, contexts = 0;
 static bool fail_context = false, throw_sample = false;
-static unsigned fail_on_block = 0, cancel_on_block = 0;
+static std::atomic<unsigned> fail_on_block{0};
 static std::atomic<bool> cancelled{false};
+static std::atomic<size_t> calls{0};
+static std::function<void(char, unsigned)> before_sample;
 struct Resource {
     int refs = 1;
     bool key;
@@ -59,14 +61,15 @@ extern "C" void** _ZNK18SVFootHillPContext9kdContextEv(void* p) {
 extern "C" long NfcRKVnxuKZy04KWbdFu71Ou(void* p, uint32_t, void* input, void* output, size_t size) {
     auto* r = static_cast<Resource*>(p);
     assert(live.count(r) && !r->key); // a cache reset must not kill active owners
+    ++calls;
     if (throw_sample) throw std::runtime_error("decrypt failed");
     assert(input == output);
     // Cheap synthetic work. The evolving sequence detects missing boundaries,
     // reordered calls, shared state and accidental context recreation.
     auto* bytes = static_cast<unsigned char*>(output);
     auto mask = static_cast<unsigned char>(++r->sequence);
-    if (fail_on_block == r->sequence) throw std::runtime_error("synthetic failure");
-    if (cancel_on_block == r->sequence) cancelled.store(true);
+    if (before_sample) before_sample(static_cast<char>(bytes[0]), r->sequence);
+    if (fail_on_block == r->sequence) throw std::runtime_error("SDK-SENSITIVE-EXCEPTION");
     for (size_t i = 0; i < size; i += 16)
         bytes[i] ^= mask;
     return 0;

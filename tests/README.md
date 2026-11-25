@@ -110,5 +110,7 @@ ownership without running AuthenticateFlow's network request. The guest remains
 network-disabled, account-free and ephemeral.
 
 The native processing fixture checks block boundaries, isolation, cancellation,
-failure prefixes, contention and summary privacy. For the release-mode timing
+failure prefixes, contention and summary privacy. The HTTP fixture exercises the
+private opt-in, framing, session checks and disconnected replies on loopback.
+For the release-mode timing
 benchmark and measurement definitions, see [Lite native audio processing](../docs/native-processing.md).

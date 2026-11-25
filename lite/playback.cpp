@@ -3,6 +3,9 @@
 #include "native_streams.h"
 #include <cstddef>
 #include <cinttypes>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include "dobby.h"
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +17,64 @@
 #include <link.h>
 
 extern const char* const fairplayCert;
+
+namespace {
+// FIFO when the private batch transport is opted in. A batch joins at the tail
+// again for every block, so earlier single requests and downloads both advance.
+class PlaybackAdmission {
+public:
+    void lock() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!active_) {
+            active_ = true;
+            return;
+        }
+        Waiter waiter;
+        waiters_.push_back(&waiter);
+        waiter.ready.wait(lock, [&] { return waiter.granted; });
+    }
+
+    void unlock() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (waiters_.empty()) {
+            active_ = false;
+            return;
+        }
+        auto* next = waiters_.front();
+        waiters_.pop_front();
+        next->granted = true;
+        next->ready.notify_one();
+    }
+
+    size_t waiting() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return waiters_.size();
+    }
+
+private:
+    struct Waiter {
+        std::condition_variable ready;
+        bool granted = false;
+    };
+    std::mutex mutex_;
+    std::deque<Waiter*> waiters_;
+    bool active_ = false;
+};
+
+PlaybackAdmission playback_admission;
+std::atomic<bool> native_batch_enabled{false};
+
+std::unique_lock<PlaybackAdmission> take_playback_turn() {
+    std::unique_lock<PlaybackAdmission> turn(playback_admission, std::defer_lock);
+    if (native_batch_enabled.load(std::memory_order_relaxed)) turn.lock();
+    return turn;
+}
+
+struct PlaybackLock {
+    std::unique_lock<PlaybackAdmission> turn = take_playback_turn();
+    std::lock_guard<std::mutex> sdk{g_playback_mutex};
+};
+}
 
 const char* get_m3u8_download(unsigned long adam) {
     alignas(std::max_align_t) uint8_t purchase_request[1024] = {};
@@ -266,7 +327,7 @@ static int capture_content_template(const std::string& adam, const std::string& 
 std::string get_m3u8(const std::string& adamId) {
     unsigned long adamID = strtoul(adamId.c_str(), nullptr, 10);
     if (adamID == 0) return "";
-    std::lock_guard<std::mutex> lock(g_playback_mutex);
+    PlaybackLock lock;
     const char* m3u8 = nullptr;
     if (offlineFlag) {
         m3u8 = get_m3u8_download(adamID);
@@ -286,7 +347,7 @@ M3u8PlaybackResult get_m3u8_playback(const std::string& adamId) {
     const unsigned long adam = strtoul(adamId.c_str(), nullptr, 10);
     if (!adam) return result;
 
-    std::lock_guard<std::mutex> lock(g_playback_mutex);
+    PlaybackLock lock;
     std::unique_ptr<char, decltype(&free)> url(
         const_cast<char*>(get_m3u8_play(adam, &result.authorization_status)), &free);
     if (url) result.url = url.get();
@@ -297,7 +358,7 @@ std::string get_key(const std::string& adamId, const std::string& uri,
                     uint8_t* ctx, uint8_t* state,
                     uint64_t* rcx, uint64_t* rax, uint64_t* rdx,
                     uint64_t* r9, uint64_t* rbp) {
-    std::lock_guard<std::mutex> lock(g_playback_mutex);
+    PlaybackLock lock;
     persistent_key persistK;
     char* ck = get_content_key_impl(adamId, uri, &persistK.p);
     if (!ck) return "";
@@ -321,12 +382,13 @@ class OwnedNativeContext final : public NativeDecryptContext {
 public:
     library_shared_ptr owner;
     void* kd = nullptr;
-    bool decrypt(const std::string& input, std::string& output, NativeTotals& times) override {
+    bool decrypt(native_batch::Block input, std::string& output, NativeTotals& times) override {
         {
             NativeTimer timer(times.copy_ns);
-            output = input;
+            output.assign(input.data, input.size);
         }
         {
+            ++times.sdk_calls;
             NativeTimer timer(times.sdk_ns);
             NfcRKVnxuKZy04KWbdFu71Ou(kd, 5, &output[0], &output[0], output.size());
         }
@@ -371,24 +433,52 @@ const char* stream_end_name(NativeStreamEnd end) {
 
 void format_native_totals(char (&out)[384], const NativeTotals& t) {
     snprintf(out, sizeof(out), "requests=%" PRIu64 " bytes=%" PRIu64 " completed_bytes=%" PRIu64
-             " wait_ns=%" PRIu64 " create_ns=%" PRIu64 " copy_ns=%" PRIu64 " sdk_ns=%" PRIu64
+             " sdk_calls=%" PRIu64 " wait_ns=%" PRIu64 " create_ns=%" PRIu64 " copy_ns=%" PRIu64 " sdk_ns=%" PRIu64
              " held_ns=%" PRIu64 " bytes_per_second=%.0f", t.requests, t.bytes, t.completed_bytes,
-             t.wait_ns, t.create_ns, t.copy_ns, t.sdk_ns, t.held_ns, t.bytes_per_second());
+             t.sdk_calls, t.wait_ns, t.create_ns, t.copy_ns, t.sdk_ns, t.held_ns, t.bytes_per_second());
 }
 
 // Declared before the lock guard so even failure summaries are logged after unlocking.
 struct StreamReporter {
     NativeReports reports;
     ~StreamReporter() {
-        for (const auto& report : reports) {
-            char first[384], reuse[384];
-            format_native_totals(first, report.first);
-            format_native_totals(reuse, report.reuse);
-            LOG_INFO("native_stream_summary end=%s first={%s} reuse={%s}",
-                     stream_end_name(report.end), first, reuse);
+        try {
+            for (const auto& report : reports) {
+                char first[384], reuse[384];
+                format_native_totals(first, report.first);
+                format_native_totals(reuse, report.reuse);
+                LOG_INFO("native_stream_summary end=%s transport_requests=%" PRIu64 " first={%s} reuse={%s}",
+                         stream_end_name(report.end), report.transport_requests, first, reuse);
+            }
+        } catch (...) {} // A diagnostic allocation failure must not change processing.
+    }
+};
+
+struct BatchReservation {
+    const std::string& stream;
+    NativeStreams::Batch batch;
+    bool active = false;
+
+    BatchReservation(const std::string& stream, uint64_t first_block, size_t count)
+        : stream(stream), batch{first_block, count} {}
+
+    ~BatchReservation() {
+        if (active) {
+            PlaybackLock lock;
+            native_streams.release_batch(stream, batch);
         }
     }
 };
+
+bool batch_cancelled(const native_batch::Check& cancelled) {
+    try { return cancelled && cancelled(); }
+    catch (...) { return true; }
+}
+
+bool batch_authorized(const native_batch::Check& authorized) {
+    try { return authorized && authorized(); }
+    catch (...) { return false; }
+}
 }
 
 static bool valid_native_stream(const std::string& stream, const std::string& adam,
@@ -402,37 +492,95 @@ static bool valid_native_stream(const std::string& stream, const std::string& ad
     return true;
 }
 
-static bool valid_native_block(const std::string& input) {
-    return !input.empty() && input.size() <= (1 << 20) && input.size() % 16 == 0;
+static bool valid_native_block(native_batch::Block input) {
+    return input.data && input.size && input.size <= (1 << 20) && input.size % 16 == 0;
 }
 
 bool native_decrypt(const std::string& stream, const std::string& adam,
                     const std::string& uri, const std::string& input,
                     std::string& output) {
     output.clear();
-    if (!valid_native_block(input) || !valid_native_stream(stream, adam, uri)) return false;
+    const native_batch::Block block{input.data(), input.size()};
+    if (!valid_native_block(block) || !valid_native_stream(stream, adam, uri)) return false;
     StreamReporter reporter;
     const auto entered = NativeClock::now();
-    std::lock_guard<std::mutex> lock(g_playback_mutex);
+    PlaybackLock lock;
     const auto acquired = NativeClock::now();
-    return native_streams.decrypt(stream, adam, uri, input, output, acquire_native_context,
-                                  reporter.reports, entered, acquired, acquired);
+    return native_streams.decrypt(stream, adam, uri, block, output, acquire_native_context,
+                                  reporter.reports, entered, acquired, acquired) == native_batch::Status::Complete;
+}
+
+void native_batch::enable() {
+    native_batch_enabled.store(true, std::memory_order_relaxed);
+}
+
+native_batch::Result native_batch::decrypt(const std::string& stream, const std::string& adam,
+                                          const std::string& uri, uint64_t first_block,
+                                          const Block* blocks, size_t count,
+                                          const Check& authorized, const Check& cancelled) {
+    Result result;
+    if (!native_batch_enabled.load(std::memory_order_relaxed)) return result;
+    result.status = Status::Invalid;
+    if (!blocks || !count || count > max_blocks || first_block > UINT64_MAX - count ||
+        !valid_native_stream(stream, adam, uri)) return result;
+    size_t bytes = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (!valid_native_block(blocks[i]) || blocks[i].size > max_bytes - bytes) return result;
+        bytes += blocks[i].size;
+    }
+
+    result.output.reserve(count);
+    StreamReporter reporter;
+    BatchReservation reservation(stream, first_block, count);
+    for (size_t i = 0; i < count; ++i) {
+        if (batch_cancelled(cancelled)) {
+            result.status = Status::Cancelled;
+            break;
+        }
+        if (!batch_authorized(authorized)) {
+            result.status = Status::Unauthorized;
+            break;
+        }
+        std::string output;
+        // Reserve writable storage before waiting for the SDK turn.
+        output.reserve(blocks[i].size);
+        {
+            const auto entered = NativeClock::now();
+            auto turn = take_playback_turn();
+            if (batch_cancelled(cancelled)) {
+                result.status = Status::Cancelled;
+                break;
+            }
+            std::lock_guard<std::mutex> lock(g_playback_mutex);
+            const auto acquired = NativeClock::now();
+            try {
+                result.status = native_streams.decrypt(stream, adam, uri, blocks[i], output,
+                    acquire_native_context, reporter.reports, entered, acquired, acquired, &reservation.batch, i);
+                if (result.status == Status::Complete) reservation.active = i + 1 < count;
+            } catch (...) {
+                result.status = Status::BlockFailed;
+            }
+        }
+        if (result.status != Status::Complete) break;
+        result.output.push_back(std::move(output));
+    }
+    return result;
 }
 
 void native_decrypt_close(const std::string& stream) {
     StreamReporter reporter;
-    std::lock_guard<std::mutex> lock(g_playback_mutex);
+    PlaybackLock lock;
     native_streams.close(stream, reporter.reports);
 }
 
 void native_decrypt_expire() {
     StreamReporter reporter;
-    std::lock_guard<std::mutex> lock(g_playback_mutex);
+    PlaybackLock lock;
     native_streams.expire(reporter.reports);
 }
 
 void native_decrypt_close_all() {
     StreamReporter reporter;
-    std::lock_guard<std::mutex> lock(g_playback_mutex);
+    PlaybackLock lock;
     native_streams.clear(reporter.reports);
 }

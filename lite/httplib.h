@@ -123,10 +123,15 @@
 #endif
 
 #ifndef CPPHTTPLIB_THREAD_POOL_COUNT
+#ifdef __ANDROID__
+// Use Lite's worker count across the Android server translation units.
+#define CPPHTTPLIB_THREAD_POOL_COUNT 8
+#else
 #define CPPHTTPLIB_THREAD_POOL_COUNT                                           \
   ((std::max)(8u, std::thread::hardware_concurrency() > 0                      \
                       ? std::thread::hardware_concurrency() - 1                \
                       : 0))
+#endif
 #endif
 
 #ifndef CPPHTTPLIB_RECV_FLAGS
@@ -626,6 +631,8 @@ struct Request {
   std::string target;
   MultipartFormDataMap files;
   Ranges ranges;
+  // Synchronous server handlers can check for peer disconnect between operations.
+  std::function<bool()> is_connection_closed;
   Match matches;
   std::unordered_map<std::string, std::string> path_params;
 
@@ -3579,7 +3586,7 @@ inline bool bind_ip_address(socket_t sock, const std::string &host) {
   return ret;
 }
 
-#if !defined _WIN32 && !defined ANDROID && !defined _AIX && !defined __MVS__
+#if !defined _WIN32 && !defined ANDROID && !defined __ANDROID__ && !defined _AIX && !defined __MVS__
 #define USE_IF2IP
 #endif
 
@@ -6426,14 +6433,16 @@ inline bool Server::write_response_core(Stream &strm, bool close_connection,
   if (need_apply_ranges) { apply_ranges(req, res, content_type, boundary); }
 
   // Prepare additional headers
-  if (close_connection || req.get_header_value("Connection") == "close") {
-    res.set_header("Connection", "close");
-  } else {
-    std::string s = "timeout=";
-    s += std::to_string(keep_alive_timeout_sec_);
-    s += ", max=";
-    s += std::to_string(keep_alive_max_count_);
-    res.set_header("Keep-Alive", s);
+  if (res.get_header_value("Connection") != "close") {
+    if (close_connection || req.get_header_value("Connection") == "close") {
+      res.set_header("Connection", "close");
+    } else {
+      std::string s = "timeout=";
+      s += std::to_string(keep_alive_timeout_sec_);
+      s += ", max=";
+      s += std::to_string(keep_alive_max_count_);
+      res.set_header("Keep-Alive", s);
+    }
   }
 
   if ((!res.body.empty() || res.content_length_ > 0 || res.content_provider_) &&
@@ -7102,6 +7111,8 @@ Server::process_request(Stream &strm, const std::string &remote_addr,
   req.local_port = local_port;
   req.set_header("LOCAL_ADDR", req.local_addr);
   req.set_header("LOCAL_PORT", std::to_string(req.local_port));
+  const auto socket = strm.socket();
+  req.is_connection_closed = [socket] { return !detail::is_socket_alive(socket); };
 
   if (req.has_header("Range")) {
     const auto &range_header_value = req.get_header_value("Range");
@@ -7166,6 +7177,8 @@ Server::process_request(Stream &strm, const std::string &remote_addr,
     }
   }
 #endif
+  // A handler may reject an unread body and end the keep-alive connection.
+  if (res.get_header_value("Connection") == "close") { connection_closed = true; }
   if (routed) {
     if (res.status == -1) {
       res.status = req.ranges.empty() ? StatusCode::OK_200

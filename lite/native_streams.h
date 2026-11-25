@@ -1,5 +1,6 @@
 #pragma once
 
+#include "native_batch.h"
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -23,6 +24,7 @@ struct NativeTimer {
 
 struct NativeTotals {
     uint64_t requests = 0, bytes = 0, completed_bytes = 0;
+    uint64_t sdk_calls = 0;
     uint64_t wait_ns = 0, create_ns = 0, copy_ns = 0, sdk_ns = 0, held_ns = 0;
     double bytes_per_second() const {
         const auto elapsed = wait_ns + held_ns;
@@ -32,6 +34,7 @@ struct NativeTotals {
 
 enum class NativeStreamEnd { Close, Idle, Failure, Shutdown };
 struct NativeSummary {
+    uint64_t transport_requests = 0;
     NativeTotals first, reuse;
     NativeStreamEnd end = NativeStreamEnd::Close;
 };
@@ -42,7 +45,7 @@ using NativeReports = std::vector<NativeSummary>;
 class NativeDecryptContext {
 public:
     virtual ~NativeDecryptContext() = default;
-    virtual bool decrypt(const std::string& input, std::string& output, NativeTotals& times) = 0;
+    virtual bool decrypt(native_batch::Block input, std::string& output, NativeTotals& times) = 0;
 };
 
 class NativeStreams {
@@ -51,26 +54,45 @@ public:
     using Factory = std::function<std::unique_ptr<NativeDecryptContext>(
         const std::string&, const std::string&)>;
 
+    // One stack-owned identity per call. Entries only compare the address under
+    // the playback mutex. Close/expiry invalidates the reservation immediately.
+    struct Batch {
+        uint64_t first_block;
+        size_t count;
+    };
+
     explicit NativeStreams(std::chrono::seconds idle = std::chrono::seconds(120))
         : idle_(idle) {}
 
-    bool decrypt(const std::string& stream, const std::string& adam,
-                 const std::string& uri, const std::string& input,
-                 std::string& output, const Factory& factory, NativeReports& reports,
-                 Clock::time_point entered, Clock::time_point acquired,
-                 Clock::time_point now) {
+    native_batch::Status decrypt(const std::string& stream, const std::string& adam,
+                                 const std::string& uri, native_batch::Block input,
+                                 std::string& output, const Factory& factory, NativeReports& reports,
+                                 Clock::time_point entered, Clock::time_point acquired,
+                                 Clock::time_point now, const Batch* batch = nullptr, size_t offset = 0) {
+        using native_batch::Status;
         output.clear();
         expire(reports, now);
         auto found = streams_.find(stream);
+        if (offset) {
+            if (found == streams_.end() || found->second.batch != batch) return Status::Cancelled;
+        } else if (found != streams_.end()) {
+            const auto& entry = found->second;
+            if (entry.batch || (batch && (entry.next_block != batch->first_block ||
+                                          entry.adam != adam || entry.uri != uri))) return Status::Conflict;
+        } else if (batch && batch->first_block != 0) {
+            return Status::Conflict;
+        }
         if (found == streams_.end()) {
-            if (streams_.size() >= 32) return false;
+            if (streams_.size() >= 32) return Status::Busy;
             found = streams_.emplace(stream, Entry{}).first;
         }
         auto& entry = found->second;
-        const bool first = !entry.context || entry.adam != adam || entry.uri != uri;
+        if (!offset) ++entry.summary.transport_requests;
+        entry.batch = batch;
+        const bool first = !entry.context || (!batch && (entry.adam != adam || entry.uri != uri));
         auto& times = first ? entry.summary.first : entry.summary.reuse;
         ++times.requests;
-        times.bytes += input.size();
+        times.bytes += input.size;
         times.wait_ns += native_ns(entered, acquired);
         bool ok = false;
         try {
@@ -90,12 +112,19 @@ public:
         if (!ok) {
             output.clear();
             finish_failure(found, first, acquired, reports);
-            return false;
+            return Status::BlockFailed;
         }
         entry.used = now;
-        times.completed_bytes += input.size();
+        if (entry.next_block != UINT64_MAX) ++entry.next_block;
+        if (batch && offset + 1 == batch->count) entry.batch = nullptr;
+        times.completed_bytes += input.size;
         times.held_ns += native_ns(acquired, Clock::now());
-        return true;
+        return Status::Complete;
+    }
+
+    void release_batch(const std::string& stream, const Batch& batch) {
+        auto found = streams_.find(stream);
+        if (found != streams_.end() && found->second.batch == &batch) found->second.batch = nullptr;
     }
 
     void close(const std::string& stream, NativeReports& reports) {
@@ -118,6 +147,8 @@ private:
         std::unique_ptr<NativeDecryptContext> context;
         Clock::time_point used;
         NativeSummary summary;
+        uint64_t next_block = 0;
+        const Batch* batch = nullptr;
     };
     using Entries = std::map<std::string, Entry>;
     Entries streams_;
